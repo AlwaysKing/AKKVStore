@@ -364,37 +364,8 @@ func (a *Admin) requireAuth(next func(http.ResponseWriter, *http.Request, auth.S
 			http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 			return
 		}
-		if r.Method == http.MethodPost && !sameOrigin(r) {
-			http.Error(w, "跨站请求被拒绝", http.StatusForbidden)
-			return
-		}
 		next(w, r, sess)
 	}
-}
-
-func sameOrigin(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		origin = r.Header.Get("Referer")
-	}
-	if origin == "" {
-		// 非浏览器客户端（curl 等）；SameSite=Strict 的 cookie 已能阻止浏览器跨站提交。
-		return true
-	}
-	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" {
-		return false
-	}
-	hosts := []string{r.Host}
-	if xfh := r.Header.Get("X-Forwarded-Host"); xfh != "" {
-		hosts = append(hosts, strings.TrimSpace(strings.Split(xfh, ",")[0]))
-	}
-	for _, h := range hosts {
-		if strings.EqualFold(u.Host, h) {
-			return true
-		}
-	}
-	return false
 }
 
 func (a *Admin) securityHeaders(next http.Handler) http.Handler {
@@ -450,10 +421,6 @@ func (a *Admin) getLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Admin) postInitialAdminPassword(w http.ResponseWriter, r *http.Request) {
-	if !sameOrigin(r) {
-		http.Error(w, "跨站请求被拒绝", http.StatusForbidden)
-		return
-	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "请求格式错误", http.StatusBadRequest)
 		return
@@ -526,10 +493,6 @@ func (a *Admin) postInitialAdminPassword(w http.ResponseWriter, r *http.Request)
 }
 
 func (a *Admin) postLogin(w http.ResponseWriter, r *http.Request) {
-	if !sameOrigin(r) {
-		http.Error(w, "跨站请求被拒绝", http.StatusForbidden)
-		return
-	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "请求格式错误", http.StatusBadRequest)
 		return
@@ -633,14 +596,6 @@ var errLoginCodeCooldown = errors.New("验证码发送过于频繁，请稍后�
 
 func (a *Admin) postSendLoginCode(w http.ResponseWriter, r *http.Request) {
 	jsonRequested := strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/json")
-	if !sameOrigin(r) {
-		if jsonRequested {
-			writeAdminJSON(w, http.StatusForbidden, map[string]string{"error": "跨站请求被拒绝"})
-			return
-		}
-		http.Error(w, "跨站请求被拒绝", http.StatusForbidden)
-		return
-	}
 	settings, err := a.store.GetAdminSettings()
 	if err != nil {
 		a.log.Error("read admin settings", "err", err)

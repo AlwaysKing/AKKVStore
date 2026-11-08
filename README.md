@@ -202,7 +202,7 @@ server {
 }
 ```
 
-管理后台的 POST 会校验 `Origin` / `Referer` 的 host。反向代理必须保留 `Host`，或者正确设置 `X-Forwarded-Host`。
+管理后台 POST 不校验 `Origin` / `Referer` 的 host，因此反向代理使用内网 Host 不会触发同源拒绝。管理后台访问权限仍由登录会话 Cookie 控制。
 
 ## 直接运行二进制
 

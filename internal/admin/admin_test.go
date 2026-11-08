@@ -1006,7 +1006,7 @@ func TestAdminEndToEnd(t *testing.T) {
 	ts, st, client := newAdminServer(t)
 	login(t, ts, client)
 
-	// 跨站 POST 应被拒绝
+	// Origin 不再参与管理后台请求鉴权，代理后的 Host 差异不应阻止 POST。
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/admin/projects", strings.NewReader("name=evil"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Origin", "https://evil.example.com")
@@ -1014,16 +1014,16 @@ func TestAdminEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cross-origin post: %v", err)
 	}
-	bodyOf(t, resp)
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("cross-origin status = %d", resp.StatusCode)
+	body := bodyOf(t, resp)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "evil") {
+		t.Fatalf("cross-origin POST was not allowed: status=%d body=%s", resp.StatusCode, body)
 	}
 
 	resp, err = client.PostForm(ts.URL+"/admin/projects", url.Values{"name": {"demo"}})
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	body := bodyOf(t, resp)
+	body = bodyOf(t, resp)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "demo") {
 		t.Fatalf("create project status=%d body=%s", resp.StatusCode, body)
 	}
