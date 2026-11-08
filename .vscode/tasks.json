@@ -1,0 +1,27 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "启动服务",
+      "type": "shell",
+      "command": "zsh",
+      "args": [
+        "-lc",
+        "if [ ! -f .env ]; then echo '缺少 .env，请先执行: cp .env.example .env'; exit 1; fi; set -a; source .env; set +a; export AKKV_COOKIE_SECURE=false; exec go run ./cmd/akkvstore"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    }
+  ]
+}

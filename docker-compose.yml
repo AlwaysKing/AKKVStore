@@ -1,0 +1,30 @@
+services:
+  akkvstore:
+    build: .
+    image: akkvstore:latest
+    container_name: akkvstore
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      AKKV_DATA_DIR: /data
+      AKKV_LISTEN: ":8080"
+      TZ: "${TZ:-Asia/Shanghai}"
+    ports:
+      # 只绑定本机，由 Caddy/Nginx 对外提供 HTTPS。
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./data:/data
+    tmpfs:
+      - /tmp
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

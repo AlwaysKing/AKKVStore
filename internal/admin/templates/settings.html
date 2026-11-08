@@ -1,0 +1,125 @@
+{{define "settings"}}
+{{template "head" .}}
+{{template "nav" .}}
+<main class="workspace-shell">
+  {{template "workspaceSidebar" .}}
+
+  <section class="workspace-main">
+    {{template "alerts" .}}
+
+    <div class="workspace-content-head">
+      <div>
+        <h2>项目设置</h2>
+        <p>{{.Project.Name}}</p>
+      </div>
+    </div>
+
+    <section class="settings-panel">
+      <section class="settings-section">
+        <div>
+          <strong>访问 Token</strong>
+          <p>每个 Token 拥有完整访问权限，可独立创建、查看和删除。</p>
+        </div>
+        <button class="btn small primary" type="button" data-open-dialog="new-token-dialog">新建 Token</button>
+      </section>
+
+      <section class="token-list-section">
+        {{if .Tokens}}
+        <div class="token-table-wrap">
+          <table class="token-table">
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>使用 Token</th>
+                <th>访问量</th>
+                <th>读取量</th>
+                <th>修改量</th>
+                <th>最后使用</th>
+                <th>创建时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{range .Tokens}}
+              <tr>
+                <td><strong>{{.Name}}</strong></td>
+                <td>
+                  {{if .Token}}
+                  <div class="token-secret" data-token-secret data-token="{{.Token}}">
+                    <code class="token-secret-value" data-token-display>{{tokenMask .Token}}</code>
+                    <button class="token-icon-button" type="button" data-token-toggle aria-label="显示 Token" title="显示 Token">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z"/>
+                        <circle cx="12" cy="12" r="2.6"/>
+                      </svg>
+                    </button>
+                    <button class="token-icon-button" type="button" data-token-copy aria-label="复制 Token" title="复制 Token">
+                      <svg class="copy-icon" data-token-copy-icon viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <rect x="8" y="8" width="11" height="11" rx="2"/>
+                        <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>
+                      </svg>
+                      <svg class="copy-check-icon" data-token-copied-icon hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M5 12.5l4.2 4.2L19 7"/>
+                      </svg>
+                    </button>
+                  </div>
+                  {{else}}
+                  <span class="token-legacy">旧 Token 不可恢复</span>
+                  {{end}}
+                </td>
+                <td>{{.RequestCount}}</td>
+                <td>{{.ReadCount}}</td>
+                <td>{{.WriteCount}}</td>
+                <td class="muted token-time">{{formatTime .LastUsedAt}}</td>
+                <td class="muted token-time">{{formatTime .CreatedAt}}</td>
+                <td class="action-cell">
+                  <form method="post" action="/admin/projects/{{path $.Project.Name}}/tokens/{{.ID}}/delete">
+                    {{if $.ActiveTable}}<input type="hidden" name="table" value="{{$.ActiveTable}}">{{end}}
+                    <button class="btn small danger-soft" type="submit" data-confirm="确定删除 Token {{.Name}}？删除后使用该 Token 的应用将无法访问。">删除</button>
+                  </form>
+                </td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+        {{else}}
+        <p class="token-empty">暂无 Token。当前项目的公开 API 不可访问，请新建 Token。</p>
+        {{end}}
+      </section>
+
+      <section class="settings-section settings-danger">
+        <div>
+          <strong>删除项目</strong>
+          <p>会删除 project.db、全部 Table 和 Key，且不可恢复。</p>
+        </div>
+        <form method="post" action="/admin/projects/{{path .Project.Name}}/delete">
+          <input name="confirm" placeholder="输入 {{.Project.Name}}" autocomplete="off" required>
+          <button class="btn danger small" type="submit" data-confirm="确定删除项目 {{.Project.Name}}？此操作不可恢复。">删除项目</button>
+        </form>
+      </section>
+    </section>
+
+    <dialog id="new-token-dialog" class="modal">
+      <form method="post" action="/admin/projects/{{path .Project.Name}}/tokens" class="modal-card">
+        {{if .ActiveTable}}<input type="hidden" name="table" value="{{.ActiveTable}}">{{end}}
+        <div class="modal-head">
+          <div>
+            <span class="eyebrow">NEW TOKEN</span>
+            <h2>新建访问 Token</h2>
+          </div>
+          <button class="modal-close" type="button" data-close-dialog aria-label="关闭">×</button>
+        </div>
+        <label>Token 名称
+          <input name="token_name" placeholder="例如 iOS 客户端" maxlength="80" autocomplete="off" autofocus required>
+        </label>
+        <div class="form-actions">
+          <button class="btn ghost" type="button" data-close-dialog>取消</button>
+          <button class="btn primary" type="submit">创建 Token</button>
+        </div>
+      </form>
+    </dialog>
+  </section>
+</main>
+{{template "footer" .}}
+{{end}}

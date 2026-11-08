@@ -1,0 +1,18 @@
+{{define "project"}}
+{{template "head" .}}
+{{template "nav" .}}
+<main class="workspace-shell">
+  {{template "workspaceSidebar" .}}
+
+  <section class="workspace-main">
+    {{template "alerts" .}}
+
+    <section class="empty-state workspace-empty">
+      <span class="empty-icon">+</span>
+      <h2>这个项目还没有 Table</h2>
+      <p>在左侧输入 Table 名称创建，创建后右侧会直接显示数据。</p>
+    </section>
+  </section>
+</main>
+{{template "footer" .}}
+{{end}}

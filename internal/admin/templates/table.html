@@ -1,0 +1,143 @@
+{{define "table"}}
+{{template "head" .}}
+{{template "nav" .}}
+<main class="workspace-shell">
+  {{template "workspaceSidebar" .}}
+
+  <section class="workspace-main">
+    {{template "alerts" .}}
+
+    <form id="new-key-inline-form" class="inline-editor-form" method="post" enctype="multipart/form-data" action="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}/key?return_to=table&create=1">
+      <input type="hidden" name="action" value="save">
+    </form>
+    <form id="inline-value-edit-form" class="inline-editor-form" method="post" enctype="multipart/form-data">
+      <input type="hidden" name="action" value="save">
+      <input type="hidden" name="content_type" data-inline-content-type>
+      <input type="hidden" name="require_file" data-inline-require-file>
+    </form>
+    <form id="inline-content-type-edit-form" class="inline-editor-form" method="post" action="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}/key/content-type">
+      <input type="hidden" name="key" data-inline-content-type-key>
+    </form>
+    <form id="inline-key-rename-form" class="inline-editor-form" method="post" action="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}/key/rename">
+      <input type="hidden" name="old_key" data-inline-old-key>
+    </form>
+    <form id="bulk-delete-form" class="inline-editor-form" method="post" action="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}/keys/delete"></form>
+
+    <section class="data-panel data-direct">
+      <div class="toolbar table-toolbar">
+        <form class="search-form" method="get" action="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}">
+          <label class="search-box">
+            <span>⌕</span>
+            <input name="prefix" value="{{.Prefix}}" maxlength="1024" placeholder="按 key 前缀过滤" autocomplete="off">
+          </label>
+          <button class="btn small" type="submit">过滤</button>
+          {{if .Prefix}}
+          <a class="btn small ghost" href="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}">清除</a>
+          {{end}}
+        </form>
+        <div class="table-toolbar-actions">
+          <div class="selection-actions" data-selection-actions hidden>
+            <button class="btn small danger-soft" type="button" data-bulk-delete disabled>删除选中</button>
+          </div>
+          <button class="btn small" type="button" data-toggle-selection>选择</button>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table class="data-table">
+          <colgroup>
+            <col class="col-key">
+            <col class="col-value">
+            <col class="col-content-type">
+            <col class="col-size">
+            <col class="col-updated-at">
+            <col class="col-actions">
+          </colgroup>
+          <thead>
+            <tr>
+              <th>Key</th>
+              <th>Value</th>
+              <th>Content-Type</th>
+              <th>Size</th>
+              <th>Updated At</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {{range .Keys}}
+            <tr class="data-row">
+              <td class="editable-cell key-cell"
+                  data-cell="key"
+                  data-key="{{.Key}}"
+                  data-rename-url="/admin/projects/{{path $.Project.Name}}/tables/{{path $.Table.Name}}/key/rename">
+                <code>{{displayKey .Key}}</code>
+              </td>
+              <td class="editable-cell value-cell"
+                  data-cell="value"
+                  data-content-url="/admin/projects/{{path $.Project.Name}}/tables/{{path $.Table.Name}}/key/content?key={{urlquery .Key}}"
+                  data-edit-url="/admin/projects/{{path $.Project.Name}}/tables/{{path $.Table.Name}}/key?return_to=table&key={{urlquery .Key}}">
+                <span class="value-preview">{{.ValuePreview}}</span>
+              </td>
+              <td class="editable-cell muted content-type content-type-cell"
+                  data-cell="content-type"
+                  data-key="{{.Key}}"
+                  data-content-type="{{.ContentType}}">{{.ContentType}}</td>
+              <td>{{humanSize .Size}}</td>
+              <td class="muted updated-at-cell">{{formatTime .UpdatedAt}}</td>
+              <td class="action-cell">
+                <div class="row-actions">
+                  <form method="post" action="/admin/projects/{{path $.Project.Name}}/tables/{{path $.Table.Name}}/key?return_to=table&key={{urlquery .Key}}" class="row-delete-form">
+                    <input type="hidden" name="action" value="delete">
+                    <button class="btn small danger-soft" type="submit" data-confirm="确定删除 Key {{displayKey .Key}}？">删除</button>
+                  </form>
+                  <input class="row-select-checkbox" type="checkbox" data-select-key="{{.Key}}" aria-label="选择 Key {{displayKey .Key}}">
+                </div>
+              </td>
+            </tr>
+            {{end}}
+            <tr class="table-action-row" id="new-key-trigger-row">
+              <td colspan="6">
+                <button class="table-add-link" type="button" data-new-key>+ 新建 Key</button>
+              </td>
+            </tr>
+            <tr class="inline-editor-row" id="new-key-editor-row" hidden>
+              <td><input form="new-key-inline-form" name="key" placeholder="key" maxlength="1024" autocomplete="off" required data-new-key-input></td>
+              <td>
+                <div class="inline-value-editor">
+                  <textarea form="new-key-inline-form" name="value" rows="1" placeholder="value"></textarea>
+                  <span class="inline-file-badge" data-inline-file-badge hidden>
+                    <span class="inline-file-name" data-inline-file-name></span>
+                    <button type="button" class="inline-file-remove" data-inline-file-remove aria-label="删除文件">×</button>
+                  </span>
+                  <label class="inline-file-button">
+                    文件上传
+                    <input class="inline-file-input" form="new-key-inline-form" type="file" name="file">
+                  </label>
+                </div>
+              </td>
+              <td><input form="new-key-inline-form" name="content_type" value="application/json" placeholder="application/json"></td>
+              <td></td>
+              <td></td>
+              <td class="action-cell">
+                <button class="btn small ghost" type="button" data-cancel-new-key>取消</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      {{if gt .Pages 1}}
+      <div class="pager table-pager">
+        {{if gt .Page 1}}
+        <a class="btn small" href="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}?page={{sub .Page 1}}&prefix={{urlquery .Prefix}}">上一页</a>
+        {{end}}
+        <span class="muted">{{.Page}} / {{.Pages}}</span>
+        {{if lt .Page .Pages}}
+        <a class="btn small" href="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}?page={{add .Page 1}}&prefix={{urlquery .Prefix}}">下一页</a>
+        {{end}}
+      </div>
+      {{end}}
+    </section>
+  </section>
+</main>
+{{template "footer" .}}
+{{end}}

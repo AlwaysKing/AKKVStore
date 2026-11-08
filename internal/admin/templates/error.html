@@ -1,0 +1,12 @@
+{{define "error"}}
+{{template "head" .}}
+{{template "nav" .}}
+<main class="wrap">
+  <section class="card">
+    <h1>{{.Title}}</h1>
+    <p>{{.Message}}</p>
+    <p><a class="btn" href="/admin/">返回项目列表</a></p>
+  </section>
+</main>
+{{template "footer" .}}
+{{end}}

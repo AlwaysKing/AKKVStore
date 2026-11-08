@@ -1,0 +1,89 @@
+{{define "login"}}
+{{template "head" .}}
+<main class="auth">
+  <div class="card narrow">
+    <h1 class="login-title">AKKV Store</h1>
+    <p class="login-subtitle">管理员登录</p>
+    {{template "alerts" .}}
+
+    {{if .NeedsSetup}}
+    <p class="login-tip">首次使用，请设置管理员初始密码</p>
+    <form method="post" action="/admin/login/setup">
+      <label>初始密码
+        <input type="password" name="new_password" minlength="8" maxlength="72" autocomplete="new-password" autofocus required>
+      </label>
+      <label>确认初始密码
+        <input type="password" name="confirm_password" minlength="8" maxlength="72" autocomplete="new-password" required>
+      </label>
+      <button class="btn primary login-submit" type="submit">设置密码并登录</button>
+    </form>
+    {{else}}
+    {{if and .PasswordLoginEnabled .BarkLoginEnabled}}
+    <div class="login-tabs" role="tablist" aria-label="登录方式">
+      <button class="login-tab{{if eq .ActiveMethod "password"}} active{{end}}"
+              type="button"
+              role="tab"
+              aria-selected="{{if eq .ActiveMethod "password"}}true{{else}}false{{end}}"
+              data-login-tab="password">密码登录</button>
+      <button class="login-tab{{if eq .ActiveMethod "bark"}} active{{end}}"
+              type="button"
+              role="tab"
+              aria-selected="{{if eq .ActiveMethod "bark"}}true{{else}}false{{end}}"
+              data-login-tab="bark">Bark 推送</button>
+    </div>
+    {{end}}
+
+    {{if .PasswordLoginEnabled}}
+    <div class="login-panel"
+         data-login-panel="password"
+         role="tabpanel"
+         {{if ne .ActiveMethod "password"}}hidden{{end}}>
+      <form method="post" action="/admin/login">
+        <input type="hidden" name="login_method" value="password">
+        <input class="login-input"
+               type="password"
+               name="password"
+               placeholder="请输入管理密码"
+               autocomplete="current-password"
+               aria-label="管理员密码"
+               {{if eq .ActiveMethod "password"}}autofocus{{end}}
+               required>
+        <button class="btn primary login-submit" type="submit">登录</button>
+      </form>
+    </div>
+    {{end}}
+
+    {{if .BarkLoginEnabled}}
+    <div class="login-panel"
+         data-login-panel="bark"
+         role="tabpanel"
+         {{if ne .ActiveMethod "bark"}}hidden{{end}}>
+      <form method="post" action="/admin/login">
+        <input type="hidden" name="login_method" value="bark">
+        <div class="otp-row">
+          <input class="login-input"
+                 name="code"
+                 inputmode="numeric"
+                 pattern="[0-9]{4}"
+                 maxlength="4"
+                 placeholder="请输入4位验证码"
+                 autocomplete="one-time-code"
+                 aria-label="4 位验证码"
+                 {{if eq .ActiveMethod "bark"}}autofocus{{end}}
+                 required>
+          <button class="btn ghost small otp-send-button"
+                  type="submit"
+                  formaction="/admin/login/code"
+                  data-login-send-code
+                  formnovalidate>发送验证码</button>
+        </div>
+        <p class="login-inline-error" data-login-send-error hidden></p>
+        <button class="btn primary login-submit" type="submit">登录</button>
+      </form>
+    </div>
+    {{end}}
+    {{end}}
+  </div>
+</main>
+{{template "footer" .}}
+{{end}}

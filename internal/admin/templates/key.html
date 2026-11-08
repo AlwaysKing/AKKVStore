@@ -1,0 +1,87 @@
+{{define "key"}}
+{{template "head" .}}
+{{template "nav" .}}
+<main class="workspace-shell">
+  {{template "workspaceSidebar" .}}
+
+  <section class="workspace-main">
+    {{template "alerts" .}}
+
+    <div class="workspace-content-head">
+      <div>
+        <a class="back-link" href="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}">← {{.Table.Name}}</a>
+        <h2>{{if .Exists}}{{.Key}}{{else}}新建 Key{{end}}</h2>
+        {{if .Exists}}
+        <p>
+          {{.ContentType}} · {{humanSize .Size}} · 更新于 {{formatTime .UpdatedAt}} ·
+          <a href="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}/download?key={{urlquery .Key}}">下载原始内容</a>
+        </p>
+        {{else}}
+        <p>Value 支持文本、JSON、二进制和大文件流式上传。</p>
+        {{end}}
+      </div>
+    </div>
+
+    {{if and .Exists (not .Previewable)}}
+    <div class="flash warn">内容为二进制或超过 1 MiB，页面不预览。可以下载原始内容，或选择文件覆盖。</div>
+    {{end}}
+
+    <section class="data-panel key-editor">
+      <form method="post" enctype="multipart/form-data" action="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}/key{{if .Exists}}?key={{urlquery .Key}}{{else}}?create=1{{end}}">
+        <input type="hidden" name="action" value="save">
+
+        <div class="field-grid">
+          {{if .Exists}}
+          <input type="hidden" name="key" value="{{.Key}}">
+          {{else}}
+          <label>Key
+            <input name="key" value="{{.Key}}" placeholder="例如 user:1001" maxlength="1024" required>
+          </label>
+          {{end}}
+
+          <label>Content-Type
+            <input name="content_type" value="{{.ContentType}}" placeholder="application/json">
+          </label>
+        </div>
+
+        {{if or (not .Exists) .Previewable}}
+        <label>文本内容
+          <textarea name="value" rows="16" spellcheck="false" placeholder="在此输入 JSON、文本或配置内容">{{.Value}}</textarea>
+        </label>
+        {{else}}
+        <input type="hidden" name="require_file" value="1">
+        {{end}}
+
+        <div class="upload-box">
+          <label>上传文件{{if and .Exists (not .Previewable)}}（必选）{{end}}
+            <input type="file" name="file">
+          </label>
+          <p class="hint">上传文件时优先使用文件自身的 Content-Type；大文件会流式写入磁盘，不占用同等内存。</p>
+        </div>
+
+        <div class="form-actions">
+          <a class="btn ghost" href="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}">取消</a>
+          <button class="btn primary" type="submit">保存内容</button>
+        </div>
+      </form>
+    </section>
+
+    {{if .Exists}}
+    <details class="danger-zone">
+      <summary>危险操作</summary>
+      <div class="danger-zone-body">
+        <div>
+          <strong>删除 Key</strong>
+          <p>删除后写入墓碑，客户端可通过记录查询获取删除状态。</p>
+        </div>
+        <form method="post" action="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}/key?return_to=table&key={{urlquery .Key}}" class="danger-inline-form">
+          <input type="hidden" name="action" value="delete">
+          <button class="btn danger" type="submit" data-confirm="确定删除 Key {{.Key}}？">删除 Key</button>
+        </form>
+      </div>
+    </details>
+    {{end}}
+  </section>
+</main>
+{{template "footer" .}}
+{{end}}

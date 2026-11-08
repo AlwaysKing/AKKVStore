@@ -1,0 +1,167 @@
+{{define "head"}}<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · AKKV Store</title>
+  <link rel="stylesheet" href="/admin/static/style.css">
+  <script src="/admin/static/app.js" defer></script>
+</head>
+<body>
+{{end}}
+
+{{define "nav"}}
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/admin/">
+      <span class="brand-mark">K</span>
+      <span>AKKV Store</span>
+      <span class="brand-tag">ADMIN</span>
+    </a>
+    <nav class="topbar-actions">
+      <a class="icon-button" href="/admin/system" aria-label="系统配置" title="系统配置">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.4 2.4-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.56V21h-3.4v-.5a1.7 1.7 0 0 0-1-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06-2.4-2.4.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1H3v-3.4h.5a1.7 1.7 0 0 0 1.56-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.4-2.4.06.06A1.7 1.7 0 0 0 9 5.6a1.7 1.7 0 0 0 1-1.56V3h3.4v.5a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.4 2.4-.06.06A1.7 1.7 0 0 0 19.4 9c.2.6.76 1 1.4 1h.5v3.4h-.5c-.64 0-1.2.4-1.4 1z"/>
+        </svg>
+      </a>
+      <form method="post" action="/admin/logout" class="inline topbar-logout-form">
+        <button class="btn ghost small topbar-logout" type="submit">退出</button>
+      </form>
+    </nav>
+  </div>
+</header>
+
+<dialog id="confirm-dialog" class="modal confirm-dialog" aria-labelledby="confirm-dialog-title">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div>
+        <span class="eyebrow">CONFIRM</span>
+        <h2 id="confirm-dialog-title">确认操作</h2>
+      </div>
+      <button class="modal-close" type="button" data-confirm-cancel aria-label="关闭">×</button>
+    </div>
+    <p class="confirm-message" data-confirm-message></p>
+    <div class="form-actions">
+      <button class="btn ghost" type="button" data-confirm-cancel autofocus>取消</button>
+      <button class="btn danger" type="button" data-confirm-accept>确认</button>
+    </div>
+  </div>
+</dialog>
+
+{{if .Flash.Token}}
+<dialog id="token-result-dialog" class="modal token-result-dialog" data-auto-open="true" aria-labelledby="token-result-title">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div>
+        <span class="eyebrow">PROJECT TOKEN</span>
+        <h2 id="token-result-title">Token 创建成功</h2>
+      </div>
+      <button class="modal-close" type="button" data-close-dialog aria-label="关闭">×</button>
+    </div>
+    <p class="confirm-message">{{.Flash.Message}}</p>
+    <div class="token-result-box">
+      <code id="flash-token" class="token-result-code">{{.Flash.Token}}</code>
+      <button type="button" class="btn small primary" data-copy="flash-token">
+        <svg class="copy-icon" data-copy-icon viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="8" y="8" width="11" height="11" rx="2"/>
+          <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>
+        </svg>
+        <svg class="copy-check-icon" data-copied-icon hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M5 12.5l4.2 4.2L19 7"/>
+        </svg>
+        <span data-copy-label>复制 Token</span>
+      </button>
+    </div>
+    <div class="form-actions">
+      <button class="btn ghost" type="button" data-close-dialog autofocus>完成</button>
+    </div>
+  </div>
+</dialog>
+{{end}}
+
+{{end}}
+
+{{define "alerts"}}
+{{if or .Flash.Message .Flash.Error .Error}}
+<div class="flash-stack" aria-live="polite">
+  {{if and .Flash.Message (not .Flash.Token)}}
+  <div class="flash ok">
+    <div>{{.Flash.Message}}</div>
+  </div>
+  {{end}}
+  {{if .Flash.Error}}
+  <div class="flash err">{{.Flash.Error}}</div>
+  {{end}}
+  {{if .Error}}
+  <div class="flash err">{{.Error}}</div>
+  {{end}}
+</div>
+{{end}}
+{{end}}
+
+{{define "workspaceSidebar"}}
+<aside class="workspace-sidebar">
+  <div class="sidebar-project">
+    <a class="sidebar-back" href="/admin/" aria-label="返回项目列表" title="返回项目列表">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M15 18l-6-6 6-6"/>
+      </svg>
+    </a>
+    <h1>{{.Project.Name}}</h1>
+    <a class="icon-button{{if eq .Title "项目设置"}} active{{end}}" href="/admin/projects/{{path .Project.Name}}/settings{{if .ActiveTable}}?table={{urlquery .ActiveTable}}{{end}}" aria-label="项目设置" title="项目设置">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3.4"/>
+        <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.4 2.4-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.56V21h-3.4v-.5a1.7 1.7 0 0 0-1-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06-2.4-2.4.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1H3v-3.4h.5a1.7 1.7 0 0 0 1.56-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.4-2.4.06.06A1.7 1.7 0 0 0 9 5.6a1.7 1.7 0 0 0 1-1.56V3h3.4v.5a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.4 2.4-.06.06A1.7 1.7 0 0 0 19.4 9c.2.6.76 1 1.4 1h.5v3.4h-.5c-.64 0-1.2.4-1.4 1z"/>
+      </svg>
+    </a>
+  </div>
+
+  <div class="sidebar-divider"></div>
+
+  <nav class="table-picker" aria-label="Table 列表">
+    {{range .Tables}}
+    <div class="table-picker-item table-picker-row{{if eq .Name $.ActiveTable}} active{{end}}">
+      <a class="table-picker-link" href="/admin/projects/{{path $.Project.Name}}/tables/{{path .Name}}">
+        <span class="table-picker-name">{{.Name}}</span>
+      </a>
+      <form method="post" action="/admin/projects/{{path $.Project.Name}}/tables/{{path .Name}}/delete" class="table-picker-delete-form">
+        <input type="hidden" name="confirm" value="{{.Name}}">
+        <button class="table-picker-delete" type="submit" data-confirm="确定删除 Table {{.Name}}？" aria-label="删除 Table {{.Name}}" title="删除 Table">×</button>
+      </form>
+    </div>
+    {{else}}
+    <span class="table-picker-empty">暂无 Table</span>
+    {{end}}
+    <button class="table-picker-item table-add-button" type="button" data-open-dialog="new-table-dialog">
+      <span>+ 新建 Table</span>
+    </button>
+  </nav>
+
+  <dialog id="new-table-dialog" class="modal">
+    <form method="post" action="/admin/projects/{{path .Project.Name}}/tables" class="modal-card">
+      <div class="modal-head">
+        <div>
+          <span class="eyebrow">NEW TABLE</span>
+          <h2>新建 Table</h2>
+        </div>
+        <button class="modal-close" type="button" data-close-dialog aria-label="关闭">×</button>
+      </div>
+      <label>Table 名称
+        <input name="table" placeholder="例如 users" pattern="[a-z0-9][a-z0-9_-]{0,31}" maxlength="32" autocomplete="off" autofocus required>
+      </label>
+      <p class="hint">名称只能包含小写字母、数字、下划线、短横线，最长 32 字符。</p>
+      <div class="form-actions">
+        <button class="btn ghost" type="button" data-close-dialog>取消</button>
+        <button class="btn primary" type="submit">创建 Table</button>
+      </div>
+    </form>
+  </dialog>
+
+</aside>
+{{end}}
+
+{{define "footer"}}
+</body>
+</html>
+{{end}}

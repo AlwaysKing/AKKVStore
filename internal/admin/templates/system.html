@@ -1,0 +1,155 @@
+{{define "systemAuth"}}
+{{template "head" .}}
+{{template "nav" .}}
+<main class="workspace-shell auth-settings-page">
+  <aside class="workspace-sidebar">
+    <div class="sidebar-project">
+      <a class="sidebar-back" href="/admin/" aria-label="返回项目列表" title="返回项目列表">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M15 18l-6-6 6-6"/>
+        </svg>
+      </a>
+      <h1>系统配置</h1>
+    </div>
+
+    <div class="sidebar-divider"></div>
+
+    <nav class="table-picker" aria-label="系统配置项">
+      <a class="table-picker-item active" href="/admin/system" aria-current="page">
+        <svg class="system-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="8" cy="15" r="4"/>
+          <path d="M10.8 12.2 20 3"/>
+          <path d="m16 7 3 3"/>
+          <path d="m13 10 3 3"/>
+        </svg>
+        <span>认证方式</span>
+      </a>
+    </nav>
+  </aside>
+
+  <section class="workspace-main">
+  {{template "alerts" .}}
+
+  <div class="settings-page-head">
+    <span class="eyebrow">SECURITY</span>
+    <h1>认证方式</h1>
+    <p>配置管理员登录后台时可使用的认证方式。</p>
+  </div>
+
+  <section class="auth-method-list">
+    <article class="card auth-method-card" data-auth-method="password">
+      <div class="method-header">
+        <div class="method-info">
+          <h3>密码认证</h3>
+          <p class="method-desc">管理员通过密码登录管理后台</p>
+        </div>
+        <label class="toggle" aria-label="启用密码认证">
+          <input type="checkbox"
+                 data-auth-toggle="password"
+                 {{if .PasswordLoginEnabled}}checked{{end}}
+                 {{if and .PasswordLoginEnabled (not .BarkLoginEnabled)}}disabled{{end}}>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+
+      <div class="method-body" data-auth-body="password" {{if not .PasswordLoginEnabled}}hidden{{end}}>
+        <form method="post" action="/admin/system/password" class="password-auth-form">
+          <div class="single-row">
+            <input type="password"
+                   name="new_password"
+                   minlength="8"
+                   maxlength="72"
+                   autocomplete="new-password"
+                   placeholder="输入新密码"
+                   required>
+            <button class="btn primary" type="submit">更新密码</button>
+          </div>
+        </form>
+      </div>
+    </article>
+
+    <article class="card auth-method-card" data-auth-method="bark">
+      <div class="method-header">
+        <div class="method-info">
+          <h3>Bark 推送认证</h3>
+          <p class="method-desc">通过 Bark 推送一次性验证码完成管理员登录</p>
+        </div>
+        <label class="toggle" aria-label="启用 Bark 推送认证">
+          <input type="checkbox"
+                 data-auth-toggle="bark"
+                 {{if .BarkLoginEnabled}}checked{{end}}
+                 {{if or (and (not .BarkLoginEnabled) (not .BarkAddress)) (and .BarkLoginEnabled (not .PasswordLoginEnabled))}}disabled{{end}}>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+
+      <div class="method-body">
+        <div class="single-row bark-auth-row">
+          <input type="url"
+                 class="input"
+                 value="{{.BarkAddress}}"
+                 placeholder="例：https://api.day.app/yourkey"
+                 maxlength="2048"
+                 autocomplete="off"
+                 data-bark-address
+                 data-bark-saved-address="{{.BarkAddress}}">
+          <button class="btn primary"
+                  type="button"
+                  data-bark-verify>{{if .BarkAddress}}重新验证{{else}}保存并验证{{end}}</button>
+        </div>
+        <p class="verified-hint" data-bark-verified-hint {{if not .BarkAddress}}hidden{{end}}>✓ 地址已验证</p>
+        <p class="unverified-hint" data-bark-unverified-hint {{if .BarkAddress}}hidden{{end}}>验证 Bark 地址后才能启用此认证方式。</p>
+        <p class="field-error" data-bark-verify-error hidden></p>
+      </div>
+    </article>
+  </section>
+
+  <dialog id="bark-verify-dialog" class="modal bark-verify-dialog" aria-labelledby="bark-verify-title">
+    <div class="modal-card">
+      <div data-bark-code-step>
+        <div class="modal-head">
+          <div>
+            <span class="eyebrow">BARK VERIFY</span>
+            <h2 id="bark-verify-title">验证 Bark 推送</h2>
+          </div>
+          <button class="modal-close" type="button" data-close-dialog aria-label="关闭">×</button>
+        </div>
+        <p class="confirm-message">验证码已发送至 <code data-bark-verify-address></code>，请输入收到的 4 位验证码。</p>
+        <form data-bark-code-form>
+          <label>验证码
+            <input name="bark_code"
+                   inputmode="numeric"
+                   pattern="[0-9]{4}"
+                   maxlength="4"
+                   autocomplete="one-time-code"
+                   placeholder="输入验证码"
+                   data-bark-code-input
+                   autofocus
+                   required>
+          </label>
+          <p class="field-error" data-bark-code-error hidden></p>
+          <div class="form-actions">
+            <button class="btn ghost" type="button" data-close-dialog>取消</button>
+            <button class="btn primary" type="submit" data-bark-code-submit>确认</button>
+          </div>
+        </form>
+      </div>
+
+      <div data-bark-success-step hidden>
+        <div class="modal-head">
+          <div>
+            <span class="eyebrow">VERIFIED</span>
+            <h2>验证完成</h2>
+          </div>
+        </div>
+        <p class="confirm-message">Bark 推送地址已验证并保存。</p>
+        <div class="form-actions">
+          <button class="btn primary" type="button" data-close-dialog>完成</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+  </section>
+</main>
+{{template "footer" .}}
+{{end}}

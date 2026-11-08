@@ -1,0 +1,69 @@
+{{define "projects"}}
+{{template "head" .}}
+{{template "nav" .}}
+<main class="wrap dashboard dashboard-simple">
+  {{template "alerts" .}}
+
+  <section class="project-grid">
+    <button class="project-card project-create-card" type="button" data-open-dialog="new-project-dialog" aria-haspopup="dialog">
+      <span class="create-card-mark">+</span>
+      <span>
+        <strong>新建项目</strong>
+        <small>创建一个新的 KV 项目</small>
+      </span>
+    </button>
+
+    {{range .Projects}}
+    <a class="project-card" href="/admin/projects/{{path .Name}}">
+      <div class="project-card-head">
+        <span class="project-mark">{{printf "%.1s" .Name}}</span>
+        <div>
+          <h3>{{.Name}}</h3>
+          <p>更新于 {{formatTime .UpdatedAt}}</p>
+        </div>
+        <span class="project-arrow">→</span>
+      </div>
+      <div class="project-stats">
+        <div>
+          <strong>{{.TableCount}}</strong>
+          <span>Tables</span>
+        </div>
+        <div>
+          <strong>{{.KeyCount}}</strong>
+          <span>Keys</span>
+        </div>
+        <div>
+          <strong>{{compactCount .RequestCount}}</strong>
+          <span>访问量</span>
+        </div>
+        <div>
+          <strong>{{compactCount .RecentRequest}}</strong>
+          <span class="project-pressure-label">访问压力（5 分钟）</span>
+        </div>
+      </div>
+    </a>
+    {{end}}
+  </section>
+
+  <dialog id="new-project-dialog" class="modal" {{if .Error}}data-auto-open="true"{{end}}>
+    <form method="post" action="/admin/projects" class="modal-card">
+      <div class="modal-head">
+        <div>
+          <span class="eyebrow">NEW PROJECT</span>
+          <h2>新建项目</h2>
+        </div>
+        <button class="modal-close" type="button" data-close-dialog aria-label="关闭">×</button>
+      </div>
+      <label>项目名称
+        <input name="name" placeholder="例如 my-app" pattern="[a-z0-9][a-z0-9_-]{0,31}" maxlength="32" autocomplete="off" autofocus required>
+      </label>
+      <p class="hint">名称只能包含小写字母、数字、下划线、短横线，最长 32 字符。创建后默认 Token 会立即显示，也可稍后在设置中复制。</p>
+      <div class="form-actions">
+        <button class="btn ghost" type="button" data-close-dialog>取消</button>
+        <button class="btn primary" type="submit">创建项目</button>
+      </div>
+    </form>
+  </dialog>
+</main>
+{{template "footer" .}}
+{{end}}
