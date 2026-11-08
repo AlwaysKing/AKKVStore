@@ -1488,6 +1488,12 @@ func TestAdminEndToEnd(t *testing.T) {
 		!strings.Contains(body, "修改量") {
 		t.Fatalf("token list or stats missing: %s", body)
 	}
+	if !strings.Contains(body, "Project API 地址") ||
+		!strings.Contains(body, `id="project-api-url"`) ||
+		!strings.Contains(body, `data-api-path="/v1/demo"`) ||
+		!strings.Contains(body, `data-copy="project-api-url"`) {
+		t.Fatalf("project API address control missing: %s", body)
+	}
 	if !strings.Contains(body, `id="new-token-dialog"`) || !strings.Contains(body, "data-token-toggle") ||
 		!strings.Contains(body, "data-token-copy") || !strings.Contains(body, strings.Repeat("*", len(token2))) ||
 		!strings.Contains(body, `aria-label="显示 Token"`) || !strings.Contains(body, `aria-label="复制 Token"`) ||

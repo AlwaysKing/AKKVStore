@@ -76,7 +76,7 @@ func doRequest(t *testing.T, method, rawurl, token string, body []byte, headers 
 
 func TestPutGetDelete(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	base := ts.URL + "/v1/demo/tables/main/kv/" + url.PathEscape("user:1")
+	base := ts.URL + "/v1/demo/main/kv/" + url.PathEscape("user:1")
 
 	resp := doRequest(t, http.MethodPut, base, token, []byte(`{"hello":"世界"}`), map[string]string{"Content-Type": "application/json"})
 	if resp.StatusCode != http.StatusNoContent {
@@ -136,7 +136,7 @@ func TestPutGetDelete(t *testing.T) {
 
 func TestTableCRUDAndAutoCreate(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	tablesURL := ts.URL + "/v1/demo/tables"
+	tablesURL := ts.URL + "/v1/demo"
 
 	resp := doRequest(t, http.MethodGet, tablesURL, token, nil, nil)
 	if resp.StatusCode != http.StatusOK {
@@ -160,7 +160,7 @@ func TestTableCRUDAndAutoCreate(t *testing.T) {
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create table status = %d, body = %s", resp.StatusCode, readBody(resp))
 	}
-	if loc := resp.Header.Get("Location"); loc != "/v1/demo/tables/users" {
+	if loc := resp.Header.Get("Location"); loc != "/v1/demo/users" {
 		t.Fatalf("Location = %q", loc)
 	}
 	resp.Body.Close()
@@ -178,7 +178,7 @@ func TestTableCRUDAndAutoCreate(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	autoURL := ts.URL + "/v1/demo/tables/auto/kv/k"
+	autoURL := ts.URL + "/v1/demo/auto/kv/k"
 	resp = doRequest(t, http.MethodPut, autoURL, token, []byte("value"),
 		map[string]string{"Content-Type": "text/plain"})
 	if resp.StatusCode != http.StatusNoContent {
@@ -241,7 +241,7 @@ func TestTableCRUDAndAutoCreate(t *testing.T) {
 
 func TestRecordsQueryConditionsAndTombstones(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	rawurl := ts.URL + "/v1/demo/tables/main/kv/" + url.PathEscape("watchLater/series:1")
+	rawurl := ts.URL + "/v1/demo/main/kv/" + url.PathEscape("watchLater/series:1")
 	const (
 		t1 = "1760000000001"
 		t2 = "1760000000002"
@@ -303,7 +303,7 @@ func TestRecordsQueryConditionsAndTombstones(t *testing.T) {
 		t.Fatalf("failed writes changed value")
 	}
 
-	recordsURL := ts.URL + "/v1/demo/tables/main/records?prefix=" + url.QueryEscape("watchLater/") + "&includeValues=true"
+	recordsURL := ts.URL + "/v1/demo/main/records?prefix=" + url.QueryEscape("watchLater/") + "&includeValues=true"
 	resp = doRequest(t, http.MethodGet, recordsURL, token, nil, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("records status = %d, body = %s", resp.StatusCode, readBody(resp))
@@ -345,7 +345,7 @@ func TestRecordsQueryConditionsAndTombstones(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	deletedURL := ts.URL + "/v1/demo/tables/main/records?includeDeleted=true&updatedAfter=1760000000003"
+	deletedURL := ts.URL + "/v1/demo/main/records?includeDeleted=true&updatedAfter=1760000000003"
 	resp = doRequest(t, http.MethodGet, deletedURL, token, nil, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("deleted records status = %d, body = %s", resp.StatusCode, readBody(resp))
@@ -365,7 +365,7 @@ func TestRecordsQueryConditionsAndTombstones(t *testing.T) {
 func TestProjectPathCaseInsensitive(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
 	for _, project := range []string{"demo", "DEMO", "DeMo"} {
-		resp := doRequest(t, http.MethodGet, ts.URL+"/v1/"+project+"/tables", token, nil, nil)
+		resp := doRequest(t, http.MethodGet, ts.URL+"/v1/"+project, token, nil, nil)
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("project path %q status = %d, body = %s", project, resp.StatusCode, readBody(resp))
 		}
@@ -375,7 +375,7 @@ func TestProjectPathCaseInsensitive(t *testing.T) {
 
 func TestUnconditionalWritesUseClientTimestamp(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	rawurl := ts.URL + "/v1/demo/tables/main/kv/k"
+	rawurl := ts.URL + "/v1/demo/main/kv/k"
 
 	resp := doRequest(t, http.MethodPut, rawurl, token, []byte("newer"), map[string]string{
 		"Content-Type": "text/plain",
@@ -406,7 +406,7 @@ func TestUnconditionalWritesUseClientTimestamp(t *testing.T) {
 
 func TestTokenUsageStats(t *testing.T) {
 	ts, st, p, token := newTestServer(t, 1<<20, []string{"*"})
-	rawurl := ts.URL + "/v1/demo/tables/main/kv/k"
+	rawurl := ts.URL + "/v1/demo/main/kv/k"
 
 	resp := doRequest(t, http.MethodPut, rawurl, token, []byte("value"),
 		map[string]string{"Content-Type": "text/plain"})
@@ -432,7 +432,7 @@ func TestTokenUsageStats(t *testing.T) {
 
 func TestWriteConditionValidation(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	rawurl := ts.URL + "/v1/demo/tables/main/kv/k"
+	rawurl := ts.URL + "/v1/demo/main/kv/k"
 
 	req, _ := http.NewRequest(http.MethodPut, rawurl, strings.NewReader("value"))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -467,7 +467,7 @@ func TestRecordsValueBudget(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 64<<20, []string{"*"})
 	value := strings.Repeat("x", 17<<20)
 	for _, key := range []string{"a", "b"} {
-		resp := doRequest(t, http.MethodPut, ts.URL+"/v1/demo/tables/large/kv/"+key, token,
+		resp := doRequest(t, http.MethodPut, ts.URL+"/v1/demo/large/kv/"+key, token,
 			[]byte(value), map[string]string{"Content-Type": "text/plain"})
 		if resp.StatusCode != http.StatusNoContent {
 			t.Fatalf("put %s status = %d, body = %s", key, resp.StatusCode, readBody(resp))
@@ -475,7 +475,7 @@ func TestRecordsValueBudget(t *testing.T) {
 		resp.Body.Close()
 	}
 	resp := doRequest(t, http.MethodGet,
-		ts.URL+"/v1/demo/tables/large/records?includeValues=true", token, nil, nil)
+		ts.URL+"/v1/demo/large/records?includeValues=true", token, nil, nil)
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("records value budget status = %d, body = %s", resp.StatusCode, readBody(resp))
 	}
@@ -484,7 +484,7 @@ func TestRecordsValueBudget(t *testing.T) {
 
 func TestAuthFailures(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	rawurl := ts.URL + "/v1/demo/tables/main/kv/k"
+	rawurl := ts.URL + "/v1/demo/main/kv/k"
 
 	resp := doRequest(t, http.MethodGet, rawurl, "", nil, nil)
 	if resp.StatusCode != http.StatusUnauthorized {
@@ -501,14 +501,14 @@ func TestAuthFailures(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	resp = doRequest(t, http.MethodGet, ts.URL+"/v1/missing/tables/main/kv/k", token, nil, nil)
+	resp = doRequest(t, http.MethodGet, ts.URL+"/v1/missing/main/kv/k", token, nil, nil)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("missing project status = %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 
 	// 项目路径与 token 不匹配
-	resp = doRequest(t, http.MethodGet, ts.URL+"/v1/demo/tables/main/kv/k", token, nil, nil)
+	resp = doRequest(t, http.MethodGet, ts.URL+"/v1/demo/main/kv/k", token, nil, nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("missing table status = %d", resp.StatusCode)
 	}
@@ -518,7 +518,7 @@ func TestAuthFailures(t *testing.T) {
 func TestBinaryAndKeyWithSlash(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
 	body := []byte{0x00, 0x01, 0x02, 0xff, 'h', 'i'}
-	rawurl := ts.URL + "/v1/demo/tables/main/kv/dir/sub%2Fkey"
+	rawurl := ts.URL + "/v1/demo/main/kv/dir/sub%2Fkey"
 
 	resp := doRequest(t, http.MethodPut, rawurl, token, body, map[string]string{"Content-Type": "application/octet-stream"})
 	if resp.StatusCode != http.StatusNoContent {
@@ -539,7 +539,7 @@ func TestBinaryAndKeyWithSlash(t *testing.T) {
 
 func TestTooLarge(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 10, []string{"*"})
-	rawurl := ts.URL + "/v1/demo/tables/main/kv/k"
+	rawurl := ts.URL + "/v1/demo/main/kv/k"
 
 	resp := doRequest(t, http.MethodPut, rawurl, token, []byte("01234567890"), map[string]string{"Content-Type": "text/plain"})
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
@@ -565,7 +565,7 @@ func TestTooLarge(t *testing.T) {
 
 func TestCORS(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 1<<20, []string{"https://app.example.com"})
-	rawurl := ts.URL + "/v1/demo/tables/main/kv/k"
+	rawurl := ts.URL + "/v1/demo/main/kv/k"
 
 	req, _ := http.NewRequest(http.MethodOptions, rawurl, nil)
 	req.Header.Set("Origin", "https://app.example.com")
@@ -606,7 +606,7 @@ func TestCORS(t *testing.T) {
 func TestMethodAndPathErrorsAreJSON(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
 
-	resp := doRequest(t, http.MethodPost, ts.URL+"/v1/demo/tables/main/kv/k", token, []byte("x"),
+	resp := doRequest(t, http.MethodPost, ts.URL+"/v1/demo/main/kv/k", token, []byte("x"),
 		map[string]string{"Content-Type": "text/plain"})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
@@ -617,7 +617,7 @@ func TestMethodAndPathErrorsAreJSON(t *testing.T) {
 	}
 	assertErrorCode(t, resp, "method_not_allowed")
 
-	resp = doRequest(t, http.MethodGet, ts.URL+"/v1/unknown", token, nil, nil)
+	resp = doRequest(t, http.MethodGet, ts.URL+"/v1/demo/main/unknown", token, nil, nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown path status = %d", resp.StatusCode)
@@ -625,14 +625,14 @@ func TestMethodAndPathErrorsAreJSON(t *testing.T) {
 	assertErrorCode(t, resp, "not_found")
 
 	// %2F 解码后是 leading slash，属于会被路径清理改写的 key，必须拒绝。
-	resp = doRequest(t, http.MethodPut, ts.URL+"/v1/demo/tables/main/kv/%2Flead", token, []byte("x"),
+	resp = doRequest(t, http.MethodPut, ts.URL+"/v1/demo/main/kv/%2Flead", token, []byte("x"),
 		map[string]string{"Content-Type": "text/plain"})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("leading slash key status = %d, body = %s", resp.StatusCode, readBody(resp))
 	}
 
-	invalidTableURL := ts.URL + "/v1/demo/tables/Bad%20Table/kv/k"
+	invalidTableURL := ts.URL + "/v1/demo/Bad%20Table/kv/k"
 	resp = doRequest(t, http.MethodGet, invalidTableURL, token, nil, nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
@@ -668,7 +668,7 @@ func assertErrorCode(t *testing.T, resp *http.Response, want string) {
 
 func TestErrorJSON(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	resp := doRequest(t, http.MethodGet, ts.URL+"/v1/demo/tables/main/kv/missing", token, nil, nil)
+	resp := doRequest(t, http.MethodGet, ts.URL+"/v1/demo/main/kv/missing", token, nil, nil)
 	defer resp.Body.Close()
 	var payload struct {
 		Error struct {

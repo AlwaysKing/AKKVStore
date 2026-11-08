@@ -15,6 +15,26 @@
     </div>
 
     <section class="settings-panel">
+      <section class="settings-section project-api-section">
+        <div>
+          <strong>Project API 地址</strong>
+          <p>与下方任意 Token 配合使用；具体接口路径追加在此地址后。</p>
+        </div>
+        <div class="project-api-copy">
+          <code id="project-api-url" data-api-path="{{.APIBasePath}}">{{.APIBasePath}}</code>
+          <button class="btn small ghost" type="button" data-copy="project-api-url" aria-label="复制 Project API 地址">
+            <svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="8" y="8" width="11" height="11" rx="2"/>
+              <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>
+            </svg>
+            <svg class="copy-check-icon" hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M5 12.5l4.2 4.2L19 7"/>
+            </svg>
+            <span data-copy-label>复制</span>
+          </button>
+        </div>
+      </section>
+
       <section class="settings-section">
         <div>
           <strong>访问 Token</strong>

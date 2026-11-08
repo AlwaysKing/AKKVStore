@@ -229,6 +229,7 @@ type projectSettingsData struct {
 	Tables      []store.TableSummary
 	Tokens      []store.ProjectToken
 	ActiveTable string
+	APIBasePath string
 	Error       string
 }
 
@@ -1357,6 +1358,7 @@ func (a *Admin) getProjectSettings(w http.ResponseWriter, r *http.Request, sess 
 		Tables:      tables,
 		Tokens:      tokens,
 		ActiveTable: activeTable,
+		APIBasePath: "/v1/" + url.PathEscape(p.Name),
 	}
 	data.Flash = a.takeFlash(w, r)
 	a.render(w, http.StatusOK, "settings", data)

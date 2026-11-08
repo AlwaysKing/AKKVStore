@@ -47,10 +47,10 @@ func New(st *store.Store, maxValueBytes int64, origins []string, log *slog.Logge
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	// 不按方法注册，自己分发，保证 405/404 也走统一的 JSON 错误格式。
-	mux.HandleFunc("/{project}/tables", a.authed(a.handleTables))
-	mux.HandleFunc("/{project}/tables/{table}", a.authed(a.handleTable))
-	mux.HandleFunc("/{project}/tables/{table}/kv/{key...}", a.handleKV)
-	mux.HandleFunc("/{project}/tables/{table}/records", a.authed(a.handleRecords))
+	mux.HandleFunc("/{project}", a.authed(a.handleTables))
+	mux.HandleFunc("/{project}/{table}", a.authed(a.handleTable))
+	mux.HandleFunc("/{project}/{table}/kv/{key...}", a.handleKV)
+	mux.HandleFunc("/{project}/{table}/records", a.authed(a.handleRecords))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "接口不存在")
 	})
@@ -189,7 +189,7 @@ func (a *API) handleTables(w http.ResponseWriter, r *http.Request, p store.Proje
 			}
 			return
 		}
-		w.Header().Set("Location", "/v1/"+p.Name+"/tables/"+table.Name)
+		w.Header().Set("Location", "/v1/"+p.Name+"/"+table.Name)
 		writeJSON(w, http.StatusCreated, tableItem{
 			Name:      table.Name,
 			CreatedAt: table.CreatedAt,

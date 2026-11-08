@@ -745,6 +745,13 @@
     });
   }
 
+  document.querySelectorAll("[data-api-path]").forEach(function (element) {
+    var apiPath = element.getAttribute("data-api-path");
+    if (apiPath) {
+      element.textContent = new URL(apiPath, window.location.origin).href;
+    }
+  });
+
   var loginTabs = document.querySelectorAll("[data-login-tab]");
   if (loginTabs.length) {
     var activateLoginTab = function (method, focus) {

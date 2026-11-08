@@ -129,7 +129,8 @@ docker compose up -d
 1. 打开 `/admin/` 并设置管理员初始密码。
 2. 在项目首页创建 project。
 3. 打开 project 设置，创建一个或多个访问 Token。
-4. 为程序配置：
+4. 在 Token 配置上方直接复制完整的 Project API 地址。
+5. 为程序配置：
 
 ```bash
 export KV_URL=https://kv.example.com
@@ -137,7 +138,7 @@ export KV_TOKEN=kv_xxxxxxxxxxxxxxxxxxxxxxxx
 export KV_PROJECT=my-app
 ```
 
-5. 使用公开 API 创建 table 或直接 PUT 第一个 key。
+6. 使用公开 API 创建 table 或直接 PUT 第一个 key。
 
 管理后台的“认证方式”页面支持：
 
@@ -324,7 +325,7 @@ Authorization: Bearer <project-token>
 示例：
 
 ```bash
-curl "$KV_URL/v1/$KV_PROJECT/tables" \
+curl "$KV_URL/v1/$KV_PROJECT" \
   -H "Authorization: Bearer $KV_TOKEN"
 ```
 
@@ -340,15 +341,15 @@ curl "$KV_URL/v1/$KV_PROJECT/tables" \
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/v1/{project}/tables` | 列出 table |
-| `POST` | `/v1/{project}/tables` | 创建空 table |
-| `GET` | `/v1/{project}/tables/{table}` | 获取 table 元信息 |
-| `DELETE` | `/v1/{project}/tables/{table}` | 删除 table 和其外部文件 |
-| `GET` | `/v1/{project}/tables/{table}/kv/{key}` | 读取 value |
-| `HEAD` | `/v1/{project}/tables/{table}/kv/{key}` | 获取 key 元信息 |
-| `PUT` | `/v1/{project}/tables/{table}/kv/{key}` | 创建或覆盖 value |
-| `DELETE` | `/v1/{project}/tables/{table}/kv/{key}` | 写入删除墓碑 |
-| `GET` | `/v1/{project}/tables/{table}/records` | 分页查询记录 |
+| `GET` | `/v1/{project}` | 列出 table |
+| `POST` | `/v1/{project}` | 创建空 table |
+| `GET` | `/v1/{project}/{table}` | 获取 table 元信息 |
+| `DELETE` | `/v1/{project}/{table}` | 删除 table 和其外部文件 |
+| `GET` | `/v1/{project}/{table}/kv/{key}` | 读取 value |
+| `HEAD` | `/v1/{project}/{table}/kv/{key}` | 获取 key 元信息 |
+| `PUT` | `/v1/{project}/{table}/kv/{key}` | 创建或覆盖 value |
+| `DELETE` | `/v1/{project}/{table}/kv/{key}` | 写入删除墓碑 |
+| `GET` | `/v1/{project}/{table}/records` | 分页查询记录 |
 
 所有接口都支持 CORS 预检 `OPTIONS`。
 
@@ -357,7 +358,7 @@ curl "$KV_URL/v1/$KV_PROJECT/tables" \
 ### 列出 table
 
 ```http
-GET /v1/{project}/tables
+GET /v1/{project}
 ```
 
 响应：
@@ -378,7 +379,7 @@ GET /v1/{project}/tables
 ### 创建 table
 
 ```http
-POST /v1/{project}/tables
+POST /v1/{project}
 Content-Type: application/json
 ```
 
@@ -397,8 +398,8 @@ Content-Type: application/json
 ### 获取和删除 table
 
 ```http
-GET /v1/{project}/tables/{table}
-DELETE /v1/{project}/tables/{table}
+GET /v1/{project}/{table}
+DELETE /v1/{project}/{table}
 ```
 
 删除 table 会删除：
@@ -414,7 +415,7 @@ DELETE /v1/{project}/tables/{table}
 ### 写入或覆盖 value
 
 ```http
-PUT /v1/{project}/tables/{table}/kv/{key}
+PUT /v1/{project}/{table}/kv/{key}
 Authorization: Bearer <token>
 Content-Type: application/json
 X-Updated-At: 1762490000123
@@ -443,7 +444,7 @@ X-Updated-At: 1762490000123
 ### 读取 value
 
 ```http
-GET /v1/{project}/tables/{table}/kv/{key}
+GET /v1/{project}/{table}/kv/{key}
 ```
 
 成功返回原始字节和保存的 `Content-Type`，同时带：
@@ -465,7 +466,7 @@ X-Updated-At
 ### 删除 value
 
 ```http
-DELETE /v1/{project}/tables/{table}/kv/{key}
+DELETE /v1/{project}/{table}/kv/{key}
 X-Updated-At: 1762490000124
 ```
 
@@ -585,7 +586,7 @@ X-Updated-At: 1762490000122
 Last-Write-Wins 示例：
 
 ```bash
-curl -X PUT "$KV_URL/v1/$KV_PROJECT/tables/users/kv/user:1001" \
+curl -X PUT "$KV_URL/v1/$KV_PROJECT/users/kv/user:1001" \
   -H "Authorization: Bearer $KV_TOKEN" \
   -H "Content-Type: application/json" \
   -H "X-Updated-At: 1762490000123" \
@@ -596,7 +597,7 @@ curl -X PUT "$KV_URL/v1/$KV_PROJECT/tables/users/kv/user:1001" \
 ## 查询记录
 
 ```http
-GET /v1/{project}/tables/{table}/records
+GET /v1/{project}/{table}/records
 ```
 
 参数：
@@ -736,7 +737,7 @@ export MODIFIED_AT=1762490000123
 创建 table：
 
 ```bash
-curl -X POST "$KV_URL/v1/$KV_PROJECT/tables" \
+curl -X POST "$KV_URL/v1/$KV_PROJECT" \
   -H "Authorization: Bearer $KV_TOKEN" \
   -H "Content-Type: application/json" \
   --data-binary '{"name":"users"}'
@@ -745,7 +746,7 @@ curl -X POST "$KV_URL/v1/$KV_PROJECT/tables" \
 写入 JSON：
 
 ```bash
-curl -X PUT "$KV_URL/v1/$KV_PROJECT/tables/users/kv/user:1001" \
+curl -X PUT "$KV_URL/v1/$KV_PROJECT/users/kv/user:1001" \
   -H "Authorization: Bearer $KV_TOKEN" \
   -H "Content-Type: application/json" \
   -H "X-Updated-At: $MODIFIED_AT" \
@@ -755,21 +756,21 @@ curl -X PUT "$KV_URL/v1/$KV_PROJECT/tables/users/kv/user:1001" \
 读取：
 
 ```bash
-curl "$KV_URL/v1/$KV_PROJECT/tables/users/kv/user:1001" \
+curl "$KV_URL/v1/$KV_PROJECT/users/kv/user:1001" \
   -H "Authorization: Bearer $KV_TOKEN"
 ```
 
 查询并包含 value：
 
 ```bash
-curl "$KV_URL/v1/$KV_PROJECT/tables/users/records?prefix=user:&includeValues=true&limit=100" \
+curl "$KV_URL/v1/$KV_PROJECT/users/records?prefix=user:&includeValues=true&limit=100" \
   -H "Authorization: Bearer $KV_TOKEN"
 ```
 
 删除：
 
 ```bash
-curl -X DELETE "$KV_URL/v1/$KV_PROJECT/tables/users/kv/user:1001" \
+curl -X DELETE "$KV_URL/v1/$KV_PROJECT/users/kv/user:1001" \
   -H "Authorization: Bearer $KV_TOKEN" \
   -H "X-Updated-At: 1762490000124"
 ```
@@ -777,7 +778,7 @@ curl -X DELETE "$KV_URL/v1/$KV_PROJECT/tables/users/kv/user:1001" \
 上传二进制：
 
 ```bash
-curl -X PUT "$KV_URL/v1/$KV_PROJECT/tables/files/kv/report.pdf" \
+curl -X PUT "$KV_URL/v1/$KV_PROJECT/files/kv/report.pdf" \
   -H "Authorization: Bearer $KV_TOKEN" \
   -H "Content-Type: application/pdf" \
   -H "X-Updated-At: 1762490000125" \
@@ -787,7 +788,7 @@ curl -X PUT "$KV_URL/v1/$KV_PROJECT/tables/files/kv/report.pdf" \
 下载：
 
 ```bash
-curl "$KV_URL/v1/$KV_PROJECT/tables/files/kv/report.pdf" \
+curl "$KV_URL/v1/$KV_PROJECT/files/kv/report.pdf" \
   -H "Authorization: Bearer $KV_TOKEN" \
   -o report.pdf
 ```

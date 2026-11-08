@@ -1352,6 +1352,28 @@ details > summary:hover {
   font-size: 12px;
 }
 
+.project-api-copy {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 520px;
+}
+
+.project-api-copy code {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1 1 auto;
+  padding: 8px 10px;
+  border: 1px solid var(--bg-hover);
+  background: var(--bg-input);
+  color: var(--text);
+  text-overflow: ellipsis;
+  user-select: all;
+  white-space: nowrap;
+}
+
 .settings-section form {
   display: flex;
   align-items: center;
@@ -2220,6 +2242,11 @@ footer {
   }
 
   .settings-section form {
+    width: 100%;
+    flex-basis: auto;
+  }
+
+  .project-api-copy {
     width: 100%;
     flex-basis: auto;
   }
