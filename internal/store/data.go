@@ -688,17 +688,37 @@ func (s *Store) DeleteKeyConditional(
 	if err != nil {
 		return KeyMeta{}, err
 	}
-
-	state, err := loadRecordState(tx, table, key)
+	meta, removeBlob, err := s.deleteKeyTx(tx, p, table, key, updatedAt, condition)
 	if err != nil {
 		return KeyMeta{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return KeyMeta{}, err
+	}
+	if removeBlob != "" {
+		_ = os.Remove(filepath.Join(s.tableBlobDir(p, table), removeBlob))
+	}
+	return meta, nil
+}
+
+func (s *Store) deleteKeyTx(
+	tx *sql.Tx,
+	p Project,
+	table Table,
+	key string,
+	updatedAt int64,
+	condition WriteCondition,
+) (KeyMeta, string, error) {
+	state, err := loadRecordState(tx, table, key)
+	if err != nil {
+		return KeyMeta{}, "", err
 	}
 	matches, err := s.matchesCondition(p, table, state, condition)
 	if err != nil {
-		return KeyMeta{}, err
+		return KeyMeta{}, "", err
 	}
 	if !matches {
-		return KeyMeta{}, preconditionFailed(key, state)
+		return KeyMeta{}, "", preconditionFailed(key, state)
 	}
 
 	serverNow := time.Now().UnixMilli()
@@ -711,7 +731,7 @@ func (s *Store) DeleteKeyConditional(
 		keyDelta = -1
 	}
 	if err := touchTableTx(tx, table.ID, keyDelta, serverNow); err != nil {
-		return KeyMeta{}, err
+		return KeyMeta{}, "", err
 	}
 	if _, err := tx.Exec(fmt.Sprintf(`INSERT INTO "%s"
 		(key, value, blob_hash, content_hash, content_type, size, created_at, updated_at, deleted)
@@ -725,24 +745,18 @@ func (s *Store) DeleteKeyConditional(
 			updated_at = excluded.updated_at,
 			deleted = 1`, table.TableName),
 		key, []byte{}, "application/octet-stream", createdAt, updatedAt); err != nil {
-		return KeyMeta{}, err
+		return KeyMeta{}, "", err
 	}
 
 	removeBlob := ""
 	if state.BlobHash != "" {
 		var refs int64
 		if err := tx.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM "%s" WHERE blob_hash = ?`, table.TableName), state.BlobHash).Scan(&refs); err != nil {
-			return KeyMeta{}, err
+			return KeyMeta{}, "", err
 		}
 		if refs == 0 {
 			removeBlob = state.BlobHash
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return KeyMeta{}, err
-	}
-	if removeBlob != "" {
-		_ = os.Remove(filepath.Join(s.tableBlobDir(p, table), removeBlob))
 	}
 	return KeyMeta{
 		Key:         key,
@@ -750,7 +764,7 @@ func (s *Store) DeleteKeyConditional(
 		CreatedAt:   createdAt,
 		UpdatedAt:   updatedAt,
 		Deleted:     true,
-	}, nil
+	}, removeBlob, nil
 }
 
 // ListKeys 按 key 前缀分页查询当前记录，不含删除墓碑。

@@ -314,7 +314,7 @@ data/
 /v1
 ```
 
-除健康检查和管理后台外，所有公开 API 都需要 Project Token：
+除健康检查、`/v1/time` 和管理后台外，所有公开 API 都需要 Project Token：
 
 ```http
 Authorization: Bearer <project-token>
@@ -325,7 +325,7 @@ Authorization: Bearer <project-token>
 示例：
 
 ```bash
-curl "$KV_URL/v1/$KV_PROJECT" \
+curl "$KV_URL/v1/$KV_PROJECT/single" \
   -H "Authorization: Bearer $KV_TOKEN"
 ```
 
@@ -341,24 +341,46 @@ curl "$KV_URL/v1/$KV_PROJECT" \
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/v1/{project}` | 列出 table |
-| `POST` | `/v1/{project}` | 创建空 table |
-| `GET` | `/v1/{project}/{table}` | 获取 table 元信息 |
-| `DELETE` | `/v1/{project}/{table}` | 删除 table 和其外部文件 |
-| `GET` | `/v1/{project}/{table}/kv/{key}` | 读取 value |
-| `HEAD` | `/v1/{project}/{table}/kv/{key}` | 获取 key 元信息 |
-| `PUT` | `/v1/{project}/{table}/kv/{key}` | 创建或覆盖 value |
-| `DELETE` | `/v1/{project}/{table}/kv/{key}` | 写入删除墓碑 |
-| `GET` | `/v1/{project}/{table}/records` | 分页查询记录 |
+| `GET` | `/v1/time` | 获取服务器时间，无需 Token |
+| `GET` | `/v1/{project}/single` | 列出 table |
+| `POST` | `/v1/{project}/single` | 创建空 table |
+| `GET` | `/v1/{project}/single/{table}` | 获取 table 元信息 |
+| `DELETE` | `/v1/{project}/single/{table}` | 删除 table 和其外部文件 |
+| `GET` | `/v1/{project}/single/{table}/kv/{key}` | 读取 value |
+| `HEAD` | `/v1/{project}/single/{table}/kv/{key}` | 获取 key 元信息 |
+| `PUT` | `/v1/{project}/single/{table}/kv/{key}` | 创建或覆盖 value |
+| `DELETE` | `/v1/{project}/single/{table}/kv/{key}` | 写入删除墓碑 |
+| `POST` | `/v1/{project}/single/{table}/records` | 条件查询单 table 记录 |
+| `POST` | `/v1/{project}/records` | 条件查询整个 project 的记录 |
+| `POST` | `/v1/{project}/batch` | 可选事务的批量写入/删除 |
 
 所有接口都支持 CORS 预检 `OPTIONS`。
+
+## 服务器时间
+
+```http
+GET /v1/time
+```
+
+无需 Token。
+
+响应：
+
+```json
+{
+  "serverTime": 1762600000123,
+  "iso": "2026-11-09T12:00:00.123Z"
+}
+```
+
+服务端只返回当前时间。客户端如何使用该时间、如何同步以及如何保存最后同步位置，均由客户端决定。
 
 ## Table API
 
 ### 列出 table
 
 ```http
-GET /v1/{project}
+GET /v1/{project}/single
 ```
 
 响应：
@@ -379,7 +401,7 @@ GET /v1/{project}
 ### 创建 table
 
 ```http
-POST /v1/{project}
+POST /v1/{project}/single
 Content-Type: application/json
 ```
 
@@ -398,8 +420,8 @@ Content-Type: application/json
 ### 获取和删除 table
 
 ```http
-GET /v1/{project}/{table}
-DELETE /v1/{project}/{table}
+GET /v1/{project}/single/{table}
+DELETE /v1/{project}/single/{table}
 ```
 
 删除 table 会删除：
@@ -415,7 +437,7 @@ DELETE /v1/{project}/{table}
 ### 写入或覆盖 value
 
 ```http
-PUT /v1/{project}/{table}/kv/{key}
+PUT /v1/{project}/single/{table}/kv/{key}
 Authorization: Bearer <token>
 Content-Type: application/json
 X-Updated-At: 1762490000123
@@ -444,7 +466,7 @@ X-Updated-At: 1762490000123
 ### 读取 value
 
 ```http
-GET /v1/{project}/{table}/kv/{key}
+GET /v1/{project}/single/{table}/kv/{key}
 ```
 
 成功返回原始字节和保存的 `Content-Type`，同时带：
@@ -466,7 +488,7 @@ X-Updated-At
 ### 删除 value
 
 ```http
-DELETE /v1/{project}/{table}/kv/{key}
+DELETE /v1/{project}/single/{table}/kv/{key}
 X-Updated-At: 1762490000124
 ```
 
@@ -586,7 +608,7 @@ X-Updated-At: 1762490000122
 Last-Write-Wins 示例：
 
 ```bash
-curl -X PUT "$KV_URL/v1/$KV_PROJECT/users/kv/user:1001" \
+curl -X PUT "$KV_URL/v1/$KV_PROJECT/single/users/kv/user:1001" \
   -H "Authorization: Bearer $KV_TOKEN" \
   -H "Content-Type: application/json" \
   -H "X-Updated-At: 1762490000123" \
@@ -594,29 +616,83 @@ curl -X PUT "$KV_URL/v1/$KV_PROJECT/users/kv/user:1001" \
   --data-binary '{"name":"张三","vip":true}'
 ```
 
-## 查询记录
+## 条件查询
+
+records 查询统一使用 `POST + JSON Body`。不设置条件时返回默认分页记录。
+
+### 查询单个 table
 
 ```http
-GET /v1/{project}/{table}/records
+POST /v1/{project}/single/{table}/records
+Authorization: Bearer <token>
+Content-Type: application/json
 ```
 
-参数：
+```json
+{
+  "condition": {
+    "all": [
+      {
+        "field": "updatedAt",
+        "op": "gt",
+        "value": 1762600000000
+      },
+      {
+        "field": "key",
+        "op": "startsWith",
+        "value": "user:"
+      }
+    ]
+  },
+  "includeDeleted": false,
+  "includeValues": false,
+  "limit": 100,
+  "offset": 0
+}
+```
 
-| 参数 | 默认值 | 说明 |
+### 查询整个 project
+
+```http
+POST /v1/{project}/records
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+```json
+{
+  "tables": ["users", "sessions"],
+  "condition": {
+    "all": [
+      {
+        "field": "updatedAt",
+        "op": "gt",
+        "value": 1762600000000
+      }
+    ]
+  },
+  "includeDeleted": true,
+  "includeValues": false,
+  "limit": 100,
+  "offset": 0
+}
+```
+
+`tables` 不传时查询全部 table。
+
+查询条件字段：
+
+| 字段 | 类型 | 操作符 |
 | --- | --- | --- |
-| `prefix` | 空 | key 前缀匹配 |
-| `pattern` | 空 | SQLite GLOB 模式，例如 `watchLater/*` |
-| `updatedAfter` | 空 | 客户端 `updatedAt` 下限，包含边界 |
-| `updatedBefore` | 空 | 客户端 `updatedAt` 上限，包含边界 |
-| `includeDeleted` | `false` | 是否返回删除墓碑 |
-| `includeValues` | `false` | 是否返回 value |
-| `limit` | `100` | 每页数量，最大 `500` |
-| `offset` | `0` | 分页偏移 |
+| `key` | string | `eq`、`ne`、`lt`、`lte`、`gt`、`gte`、`startsWith`、`endsWith`、`glob` |
+| `createdAt` | int64 | `eq`、`ne`、`lt`、`lte`、`gt`、`gte` |
+| `updatedAt` | int64 | `eq`、`ne`、`lt`、`lte`、`gt`、`gte` |
+| `deleted` | bool | `eq`、`ne` |
+| `size` | int64 | `eq`、`ne`、`lt`、`lte`、`gt`、`gte` |
+| `contentType` | string | `eq`、`ne`、`lt`、`lte`、`gt`、`gte`、`startsWith`、`endsWith` |
+| `contentHash` | string | `eq`、`ne`、`lt`、`lte`、`gt`、`gte`、`startsWith`、`endsWith` |
 
-`updatedAfter` 和 `updatedBefore` 支持：
-
-- Unix 毫秒时间戳
-- RFC3339 时间
+所有条件按 AND 计算。`updatedAt` 是客户端通过 `X-Updated-At` 提交的值。
 
 响应：
 
@@ -624,6 +700,7 @@ GET /v1/{project}/{table}/records
 {
   "items": [
     {
+      "table": "users",
       "key": "user:1001",
       "createdAt": 1760000000000,
       "updatedAt": 1760000005000,
@@ -641,15 +718,108 @@ GET /v1/{project}/{table}/records
 }
 ```
 
-`includeValues=true` 时：
+单 table 查询的 `items` 同样包含 `table`，便于两种查询共享响应结构。
 
-- 所有 value 都返回 `valueBase64`。
-- 常见文本类型且内容为合法 UTF-8 时额外返回 `valueText`。
-- 单页原始 value 总量超过 32 MiB 返回 `413 query_value_limit`。
+排序和限制：
 
-大文件应使用单个 key 的 GET 接口下载，不要在 records 中批量拉取。
+- 单 table：`key ASC`
+- Project：`table ASC, key ASC`
+- `limit` 默认 100，最大 500
+- `includeValues=true` 时单页原始 value 总量不能超过 32 MiB
+- 大文件应通过单 key GET 下载
 
-`updatedAt` 完全由客户端提交。时间回拨、错误时钟和迟到的离线写入可能造成覆盖顺序不符合业务预期；时间过滤不能替代全量快照。
+服务端只执行请求中给出的条件和分页，不保证查询期间数据快照稳定，也不负责增量同步完整性。
+
+## 批量更新
+
+```http
+POST /v1/{project}/batch
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+```json
+{
+  "transaction": true,
+  "operations": [
+    {
+      "op": "put",
+      "table": "users",
+      "key": "user:1001",
+      "updatedAt": 1762600000000,
+      "contentType": "application/json",
+      "value": "{\"name\":\"Alice\"}"
+    },
+    {
+      "op": "delete",
+      "table": "sessions",
+      "key": "session:old",
+      "updatedAt": 1762600000001
+    }
+  ]
+}
+```
+
+PUT 字段：
+
+- `op=put`
+- `table`
+- `key`
+- `updatedAt`
+- `contentType`，可选
+- `value` 或 `valueBase64`，二选一
+- `condition`，可选
+
+DELETE 字段：
+
+- `op=delete`
+- `table`
+- `key`
+- `updatedAt`
+- `condition`，可选
+
+事务语义：
+
+- `transaction=true`：所有操作同一个事务，全部成功或全部回滚
+- `transaction=false`：逐项执行，返回逐项结果
+- 可跨多个 table，但不能跨 project
+- PUT 到不存在的 table 时自动创建
+- DELETE 的 table 不存在时该项失败
+- 同一批内不允许重复的 `(table,key)`
+- 最多 500 个 operation
+- 请求体最大 32 MiB
+
+`transaction=true` 成功响应：
+
+```json
+{
+  "transaction": true,
+  "applied": 2,
+  "failed": 0,
+  "results": [
+    {
+      "index": 0,
+      "op": "put",
+      "table": "users",
+      "key": "user:1001",
+      "ok": true,
+      "updatedAt": 1762600000000,
+      "contentLength": 16
+    },
+    {
+      "index": 1,
+      "op": "delete",
+      "table": "sessions",
+      "key": "session:old",
+      "ok": true,
+      "updatedAt": 1762600000001,
+      "deleted": true
+    }
+  ]
+}
+```
+
+`transaction=false` 仍返回 `200`，每项通过 `ok` 和 `status` 表示结果。
 
 ## 错误格式
 
@@ -672,6 +842,8 @@ GET /v1/{project}/{table}/records
 | `400` | `invalid_condition` | 条件格式、字段或操作符非法 |
 | `400` | `invalid_query` | records 查询参数非法 |
 | `400` | `invalid_request` | table 创建等请求体格式非法 |
+| `400` | `invalid_batch` | batch 顶层 JSON 或 operation 格式非法 |
+| `400` | `invalid_operation` | batch 中某个 put/delete 参数非法 |
 | `400` | `invalid_key` | key 格式非法 |
 | `400` | `invalid_table` | table 名称非法 |
 | `401` | `unauthorized` | Token 缺失、错误或 project 不匹配 |
@@ -737,7 +909,7 @@ export MODIFIED_AT=1762490000123
 创建 table：
 
 ```bash
-curl -X POST "$KV_URL/v1/$KV_PROJECT" \
+curl -X POST "$KV_URL/v1/$KV_PROJECT/single" \
   -H "Authorization: Bearer $KV_TOKEN" \
   -H "Content-Type: application/json" \
   --data-binary '{"name":"users"}'
@@ -746,7 +918,7 @@ curl -X POST "$KV_URL/v1/$KV_PROJECT" \
 写入 JSON：
 
 ```bash
-curl -X PUT "$KV_URL/v1/$KV_PROJECT/users/kv/user:1001" \
+curl -X PUT "$KV_URL/v1/$KV_PROJECT/single/users/kv/user:1001" \
   -H "Authorization: Bearer $KV_TOKEN" \
   -H "Content-Type: application/json" \
   -H "X-Updated-At: $MODIFIED_AT" \
@@ -756,21 +928,32 @@ curl -X PUT "$KV_URL/v1/$KV_PROJECT/users/kv/user:1001" \
 读取：
 
 ```bash
-curl "$KV_URL/v1/$KV_PROJECT/users/kv/user:1001" \
+curl "$KV_URL/v1/$KV_PROJECT/single/users/kv/user:1001" \
   -H "Authorization: Bearer $KV_TOKEN"
 ```
 
 查询并包含 value：
 
 ```bash
-curl "$KV_URL/v1/$KV_PROJECT/users/records?prefix=user:&includeValues=true&limit=100" \
-  -H "Authorization: Bearer $KV_TOKEN"
+curl -X POST "$KV_URL/v1/$KV_PROJECT/single/users/records" \
+  -H "Authorization: Bearer $KV_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data-binary '{
+    "condition":{
+      "all":[
+        {"field":"key","op":"startsWith","value":"user:"}
+      ]
+    },
+    "includeValues":true,
+    "limit":100,
+    "offset":0
+  }'
 ```
 
 删除：
 
 ```bash
-curl -X DELETE "$KV_URL/v1/$KV_PROJECT/users/kv/user:1001" \
+curl -X DELETE "$KV_URL/v1/$KV_PROJECT/single/users/kv/user:1001" \
   -H "Authorization: Bearer $KV_TOKEN" \
   -H "X-Updated-At: 1762490000124"
 ```
@@ -778,7 +961,7 @@ curl -X DELETE "$KV_URL/v1/$KV_PROJECT/users/kv/user:1001" \
 上传二进制：
 
 ```bash
-curl -X PUT "$KV_URL/v1/$KV_PROJECT/files/kv/report.pdf" \
+curl -X PUT "$KV_URL/v1/$KV_PROJECT/single/files/kv/report.pdf" \
   -H "Authorization: Bearer $KV_TOKEN" \
   -H "Content-Type: application/pdf" \
   -H "X-Updated-At: 1762490000125" \
@@ -788,7 +971,7 @@ curl -X PUT "$KV_URL/v1/$KV_PROJECT/files/kv/report.pdf" \
 下载：
 
 ```bash
-curl "$KV_URL/v1/$KV_PROJECT/files/kv/report.pdf" \
+curl "$KV_URL/v1/$KV_PROJECT/single/files/kv/report.pdf" \
   -H "Authorization: Bearer $KV_TOKEN" \
   -o report.pdf
 ```
@@ -800,7 +983,7 @@ curl "$KV_URL/v1/$KV_PROJECT/files/kv/report.pdf" \
 - 不提供完整历史版本链。
 - 不提供 TTL。
 - 不提供原子数值递增。
-- 不提供批量写事务。
+- 批量写入支持一次事务或逐项独立执行，但不跨 project。
 - 不提供服务端排序、聚合或业务字段搜索。
 - 删除墓碑不会自动回收。
 - 单管理员，不支持多用户和 RBAC。

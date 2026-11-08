@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"akkvstore/internal/store"
 )
@@ -47,10 +45,13 @@ func New(st *store.Store, maxValueBytes int64, origins []string, log *slog.Logge
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	// 不按方法注册，自己分发，保证 405/404 也走统一的 JSON 错误格式。
-	mux.HandleFunc("/{project}", a.authed(a.handleTables))
-	mux.HandleFunc("/{project}/{table}", a.authed(a.handleTable))
-	mux.HandleFunc("/{project}/{table}/kv/{key...}", a.handleKV)
-	mux.HandleFunc("/{project}/{table}/records", a.authed(a.handleRecords))
+	mux.HandleFunc("/time", a.handleTime)
+	mux.HandleFunc("/{project}/batch", a.authed(a.handleBatch))
+	mux.HandleFunc("/{project}/records", a.authed(a.handleProjectRecords))
+	mux.HandleFunc("/{project}/single", a.authed(a.handleTables))
+	mux.HandleFunc("/{project}/single/{table}", a.authed(a.handleTable))
+	mux.HandleFunc("/{project}/single/{table}/kv/{key...}", a.handleKV)
+	mux.HandleFunc("/{project}/single/{table}/records", a.authed(a.handleSingleRecords))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "接口不存在")
 	})
@@ -89,6 +90,7 @@ type createTableRequest struct {
 }
 
 type recordItem struct {
+	Table       string `json:"table,omitempty"`
 	Key         string `json:"key"`
 	CreatedAt   int64  `json:"createdAt"`
 	UpdatedAt   int64  `json:"updatedAt"`
@@ -189,7 +191,7 @@ func (a *API) handleTables(w http.ResponseWriter, r *http.Request, p store.Proje
 			}
 			return
 		}
-		w.Header().Set("Location", "/v1/"+p.Name+"/"+table.Name)
+		w.Header().Set("Location", "/v1/"+p.Name+"/single/"+table.Name)
 		writeJSON(w, http.StatusCreated, tableItem{
 			Name:      table.Name,
 			CreatedAt: table.CreatedAt,
@@ -383,150 +385,6 @@ func (a *API) handleDelete(w http.ResponseWriter, r *http.Request, p store.Proje
 		a.log.Error("record token write", "token_id", projectToken.ID, "err", err)
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (a *API) handleRecords(w http.ResponseWriter, r *http.Request, p store.Project, _ store.ProjectToken) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", "GET, OPTIONS")
-		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "不支持的 HTTP 方法")
-		return
-	}
-	tableName := r.PathValue("table")
-	if !store.ValidateTableName(tableName) {
-		writeError(w, http.StatusBadRequest, "invalid_table", "table 名称不合法")
-		return
-	}
-	query, err := parseRecordQuery(r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
-		return
-	}
-	result, err := a.store.QueryRecords(p, tableName, query)
-	if err != nil {
-		if errors.Is(err, store.ErrTableNotFound) {
-			writeError(w, http.StatusNotFound, "table_not_found", "table 不存在")
-			return
-		}
-		if errors.Is(err, store.ErrQueryValueLimit) {
-			writeError(w, http.StatusRequestEntityTooLarge, "query_value_limit", err.Error())
-			return
-		}
-		if errors.Is(err, store.ErrInvalid) {
-			writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
-			return
-		}
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "project_not_found", "project 不存在")
-			return
-		}
-		a.log.Error("query records", "project", p.Name, "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", "服务内部错误")
-		return
-	}
-
-	items := make([]recordItem, 0, len(result.Records))
-	for _, record := range result.Records {
-		item := recordItem{
-			Key:         record.Key,
-			CreatedAt:   record.CreatedAt,
-			UpdatedAt:   record.UpdatedAt,
-			Deleted:     record.Deleted,
-			ContentType: record.ContentType,
-			Size:        record.Size,
-			ContentHash: record.ContentHash,
-		}
-		if query.IncludeValues && !record.Deleted {
-			item.ValueBase64 = base64.StdEncoding.EncodeToString(record.Value)
-			if utf8.Valid(record.Value) && isTextContentType(record.ContentType) {
-				item.ValueText = string(record.Value)
-			}
-		}
-		items = append(items, item)
-	}
-	nextOffset := query.Offset + len(items)
-	response := recordsResponse{
-		Items:      items,
-		Total:      result.Total,
-		NextOffset: nextOffset,
-		HasMore:    int64(nextOffset) < result.Total,
-	}
-	writeJSON(w, http.StatusOK, response)
-}
-
-func parseRecordQuery(r *http.Request) (store.RecordQuery, error) {
-	values := r.URL.Query()
-	query := store.RecordQuery{
-		Prefix:  strings.TrimSpace(values.Get("prefix")),
-		Pattern: strings.TrimSpace(values.Get("pattern")),
-	}
-	var err error
-	if query.UpdatedAfter, err = parseTimestamp(values.Get("updatedAfter")); err != nil {
-		return store.RecordQuery{}, fmt.Errorf("updatedAfter 不合法: %w", err)
-	}
-	if query.UpdatedBefore, err = parseTimestamp(values.Get("updatedBefore")); err != nil {
-		return store.RecordQuery{}, fmt.Errorf("updatedBefore 不合法: %w", err)
-	}
-	if query.IncludeDeleted, err = parseBool(values.Get("includeDeleted")); err != nil {
-		return store.RecordQuery{}, fmt.Errorf("includeDeleted 不合法: %w", err)
-	}
-	if query.IncludeValues, err = parseBool(values.Get("includeValues")); err != nil {
-		return store.RecordQuery{}, fmt.Errorf("includeValues 不合法: %w", err)
-	}
-	limit, err := parseInt64(values.Get("limit"), 0)
-	if err != nil {
-		return store.RecordQuery{}, fmt.Errorf("limit 不合法: %w", err)
-	}
-	if limit < 0 || limit > 500 {
-		return store.RecordQuery{}, errors.New("limit 必须在 0 到 500 之间")
-	}
-	offset, err := parseInt64(values.Get("offset"), 0)
-	if err != nil {
-		return store.RecordQuery{}, fmt.Errorf("offset 不合法: %w", err)
-	}
-	if offset < 0 {
-		return store.RecordQuery{}, errors.New("offset 不能为负数")
-	}
-	query.Limit = int(limit)
-	query.Offset = int(offset)
-	return query, nil
-}
-
-func parseTimestamp(value string) (int64, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0, nil
-	}
-	if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
-		if parsed < 0 {
-			return 0, errors.New("不能为负数")
-		}
-		return parsed, nil
-	}
-	parsed, err := time.Parse(time.RFC3339, value)
-	if err != nil {
-		return 0, errors.New("应为 Unix 毫秒或 RFC3339 时间")
-	}
-	return parsed.UnixMilli(), nil
-}
-
-func parseInt64(value string, defaultValue int64) (int64, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return defaultValue, nil
-	}
-	parsed, err := strconv.ParseInt(value, 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	return parsed, nil
-}
-
-func parseBool(value string) (bool, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return false, nil
-	}
-	return strconv.ParseBool(value)
 }
 
 func parseUpdatedAt(r *http.Request) (int64, error) {

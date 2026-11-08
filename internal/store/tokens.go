@@ -245,11 +245,16 @@ func (s *Store) cleanupTokenAccess(now int64) {
 
 // RecordTokenWrite 记录一次成功的写入或删除请求。
 func (s *Store) RecordTokenWrite(tokenID int64) error {
-	if tokenID <= 0 {
+	return s.RecordTokenWrites(tokenID, 1)
+}
+
+// RecordTokenWrites 为一次批量请求累计成功修改次数。
+func (s *Store) RecordTokenWrites(tokenID int64, count int64) error {
+	if tokenID <= 0 || count <= 0 {
 		return nil
 	}
 	_, err := s.systemDB.Exec(`UPDATE project_tokens
-		SET write_count = write_count + 1 WHERE id = ?`, tokenID)
+		SET write_count = write_count + ? WHERE id = ?`, count, tokenID)
 	return err
 }
 
