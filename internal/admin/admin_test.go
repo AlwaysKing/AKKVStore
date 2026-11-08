@@ -1045,6 +1045,23 @@ func TestAdminEndToEnd(t *testing.T) {
 		t.Fatalf("created token invalid: %v", err)
 	}
 
+	resp, err = client.PostForm(ts.URL+"/admin/projects", url.Values{"name": {"MixedCase"}})
+	if err != nil {
+		t.Fatalf("create mixed-case project: %v", err)
+	}
+	body = bodyOf(t, resp)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "MixedCase") {
+		t.Fatalf("mixed-case project page status=%d body=%s", resp.StatusCode, body)
+	}
+	resp, err = client.Get(ts.URL + "/admin/projects/mixedcase")
+	if err != nil {
+		t.Fatalf("get mixed-case project with different casing: %v", err)
+	}
+	body = bodyOf(t, resp)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "MixedCase") {
+		t.Fatalf("case-insensitive project route status=%d body=%s", resp.StatusCode, body)
+	}
+
 	// 创建 Table
 	resp, err = client.PostForm(ts.URL+"/admin/projects/demo/tables", url.Values{"table": {"main"}})
 	if err != nil {

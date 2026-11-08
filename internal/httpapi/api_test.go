@@ -362,6 +362,17 @@ func TestRecordsQueryConditionsAndTombstones(t *testing.T) {
 	}
 }
 
+func TestProjectPathCaseInsensitive(t *testing.T) {
+	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
+	for _, project := range []string{"demo", "DEMO", "DeMo"} {
+		resp := doRequest(t, http.MethodGet, ts.URL+"/v1/"+project+"/tables", token, nil, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("project path %q status = %d, body = %s", project, resp.StatusCode, readBody(resp))
+		}
+		resp.Body.Close()
+	}
+}
+
 func TestUnconditionalWritesUseClientTimestamp(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
 	rawurl := ts.URL + "/v1/demo/tables/main/kv/k"

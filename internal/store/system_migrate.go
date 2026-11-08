@@ -13,6 +13,8 @@ func createSystemSchemaV6(execer sqlExecer) error {
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL
 		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_name_nocase
+			ON projects(name COLLATE NOCASE)`,
 		`CREATE TABLE IF NOT EXISTS project_tokens (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			project_id INTEGER NOT NULL,

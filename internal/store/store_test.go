@@ -439,6 +439,44 @@ func TestTableLifecycleIsolationAndStats(t *testing.T) {
 	}
 }
 
+func TestProjectNamesAreCaseInsensitive(t *testing.T) {
+	s, _ := openTestStore(t, 1<<20, 32)
+	p, token, err := s.CreateProject("MiXeD-App")
+	if err != nil {
+		t.Fatalf("CreateProject mixed case: %v", err)
+	}
+	if p.Name != "MiXeD-App" {
+		t.Fatalf("project display name = %q, want MiXeD-App", p.Name)
+	}
+
+	for _, lookup := range []string{"mixed-app", "MIXED-APP", "MiXeD-App"} {
+		got, err := s.GetProject(lookup)
+		if err != nil {
+			t.Fatalf("GetProject(%q): %v", lookup, err)
+		}
+		if got.ID != p.ID || got.Name != "MiXeD-App" {
+			t.Fatalf("GetProject(%q) = %+v", lookup, got)
+		}
+		verified, _, err := s.VerifyProjectToken(lookup, token)
+		if err != nil {
+			t.Fatalf("VerifyProjectToken(%q): %v", lookup, err)
+		}
+		if verified.ID != p.ID || verified.Name != "MiXeD-App" {
+			t.Fatalf("VerifyProjectToken(%q) = %+v", lookup, verified)
+		}
+		if _, _, err := s.CreateProjectToken(lookup, "case token"); err != nil {
+			t.Fatalf("CreateProjectToken(%q): %v", lookup, err)
+		}
+	}
+
+	if _, _, err := s.CreateProject("mixed-app"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("case-insensitive duplicate err = %v, want ErrInvalid", err)
+	}
+	if _, _, err := s.CreateProject("MIXED-APP"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("uppercase duplicate err = %v, want ErrInvalid", err)
+	}
+}
+
 func TestProjectRecentAccessWindow(t *testing.T) {
 	s, _ := openTestStore(t, 1<<20, 32)
 	p, _ := mustProject(t, s, "demo")

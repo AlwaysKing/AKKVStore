@@ -46,7 +46,7 @@ var (
 )
 
 var (
-	projectNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
+	projectNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`)
 	tableNameRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 	dataTableRe   = regexp.MustCompile(`^data_[0-9]+$`)
 	blobFileRe    = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -923,7 +923,7 @@ func NormalizeContentType(v string) (string, error) {
 // CreateProject 创建 system.db 记录和独立 project.db，不创建任何 table。
 func (s *Store) CreateProject(name string) (Project, string, error) {
 	if !ValidateProjectName(name) {
-		return Project{}, "", fmt.Errorf("%w: project 名称只能是小写字母、数字、下划线、短横线，且以字母或数字开头，最长 32 字符", ErrInvalid)
+		return Project{}, "", fmt.Errorf("%w: project 名称只能包含字母、数字、下划线、短横线，且以字母或数字开头，最长 32 字符", ErrInvalid)
 	}
 
 	s.writeMu.Lock()
@@ -985,7 +985,7 @@ func (s *Store) GetProject(name string) (Project, error) {
 
 func (s *Store) getProjectLocked(name string) (Project, error) {
 	p, err := scanProject(s.systemDB.QueryRow(`SELECT id, name, created_at, updated_at
-		FROM projects WHERE name = ?`, name))
+		FROM projects WHERE name = ? COLLATE NOCASE`, name))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Project{}, ErrNotFound
 	}

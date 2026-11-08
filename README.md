@@ -26,6 +26,8 @@ Project
 - **Value**：任意二进制数据，最大大小由 `AKKV_MAX_VALUE_BYTES` 控制。
 - **Project Token**：授权程序访问某个 project 的 API；同一个 project 可以有多个 Token。
 
+Project 名称会保留创建时的大小写显示，但唯一性检查和 API 查询忽略大小写。例如 `MyApp`、`myapp` 和 `MYAPP` 是同一个 project，不能重复创建。
+
 public API 只能访问已经存在且拥有有效 Token 的 project，不能在 API 中创建 project。
 
 ## Docker Compose 部署
