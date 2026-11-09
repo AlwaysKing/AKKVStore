@@ -39,6 +39,7 @@ const (
 	flashCookie   = "akkv_flash"
 	pageSize      = 50
 	previewLimit  = 1 << 20
+	tablePreview  = 256
 )
 
 // Admin 提供中文管理后台。
@@ -1271,7 +1272,9 @@ func (a *Admin) getTable(w http.ResponseWriter, r *http.Request, sess auth.Sessi
 	if page < 1 {
 		page = 1
 	}
-	keys, total, err := a.store.ListKeys(p, table.Name, prefix, pageSize, (page-1)*pageSize)
+	keys, total, err := a.store.ListKeysWithPreview(
+		p, table.Name, prefix, pageSize, (page-1)*pageSize, tablePreview,
+	)
 	if err != nil {
 		a.log.Error("list keys", "err", err)
 		a.renderError(w, http.StatusInternalServerError, sess, "读取 Key 列表失败")
@@ -1283,7 +1286,9 @@ func (a *Admin) getTable(w http.ResponseWriter, r *http.Request, sess auth.Sessi
 	}
 	if page > pages {
 		page = pages
-		keys, total, err = a.store.ListKeys(p, table.Name, prefix, pageSize, (page-1)*pageSize)
+		keys, total, err = a.store.ListKeysWithPreview(
+			p, table.Name, prefix, pageSize, (page-1)*pageSize, tablePreview,
+		)
 		if err != nil {
 			a.log.Error("list keys", "err", err)
 			a.renderError(w, http.StatusInternalServerError, sess, "读取 Key 列表失败")
@@ -1292,14 +1297,9 @@ func (a *Admin) getTable(w http.ResponseWriter, r *http.Request, sess auth.Sessi
 	}
 	rows := make([]keyRow, 0, len(keys))
 	for _, key := range keys {
-		preview, err := a.keyPreview(p, table.Name, key)
-		if err != nil {
-			a.log.Error("read key preview", "project", p.Name, "table", table.Name, "key", key.Key, "err", err)
-			preview = "[读取失败]"
-		}
 		rows = append(rows, keyRow{
-			KeyMeta:      key,
-			ValuePreview: preview,
+			KeyMeta:      key.KeyMeta,
+			ValuePreview: keyPreview(key),
 		})
 	}
 	data := tableData{
@@ -1364,24 +1364,17 @@ func (a *Admin) getProjectSettings(w http.ResponseWriter, r *http.Request, sess 
 	a.render(w, http.StatusOK, "settings", data)
 }
 
-func (a *Admin) keyPreview(p store.Project, tableName string, key store.KeyMeta) (string, error) {
+func keyPreview(key store.Record) string {
+	if key.ValuePreviewError != nil {
+		return "[读取失败]"
+	}
 	if key.Size == 0 {
-		return "(空)", nil
+		return "(空)"
 	}
 	if key.ContentType != store.ValueTypeString {
-		return "[二进制 " + humanSize(key.Size) + "]", nil
+		return "[二进制 " + humanSize(key.Size) + "]"
 	}
-	_, rc, err := a.store.GetKey(p, tableName, key.Key)
-	if err != nil {
-		return "", err
-	}
-	defer rc.Close()
-
-	const previewBytes = 256
-	value, err := io.ReadAll(io.LimitReader(rc, previewBytes))
-	if err != nil {
-		return "", err
-	}
+	value := key.Value
 	if !utf8.Valid(value) {
 		for len(value) > 0 && !utf8.Valid(value) {
 			value = value[:len(value)-1]
@@ -1389,7 +1382,7 @@ func (a *Admin) keyPreview(p store.Project, tableName string, key store.KeyMeta)
 	}
 	preview := strings.TrimSpace(strings.Join(strings.Fields(string(value)), " "))
 	if preview == "" {
-		return "(空)", nil
+		return "(空)"
 	}
 	truncated := key.Size > int64(len(value))
 	runes := []rune(preview)
@@ -1400,7 +1393,7 @@ func (a *Admin) keyPreview(p store.Project, tableName string, key store.KeyMeta)
 	if truncated {
 		preview += "…"
 	}
-	return preview, nil
+	return preview
 }
 
 func (a *Admin) postDeleteProject(w http.ResponseWriter, r *http.Request, sess auth.Session) {

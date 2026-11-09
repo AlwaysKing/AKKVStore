@@ -196,16 +196,21 @@ func loggingMiddleware(log *slog.Logger, next http.Handler) http.Handler {
 		if r.URL.Path == "/healthz" {
 			return
 		}
+		duration := time.Since(start)
 		status := rec.status
 		if status == 0 {
 			status = http.StatusOK
+		}
+		// 高频 KV 请求不逐条写 stdout；只保留错误和慢请求。
+		if status < http.StatusBadRequest && duration < 250*time.Millisecond {
+			return
 		}
 		log.Info("request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", status,
 			"bytes", rec.bytes,
-			"duration_ms", time.Since(start).Milliseconds(),
+			"duration_ms", duration.Milliseconds(),
 			"remote", r.RemoteAddr,
 		)
 	})

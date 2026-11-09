@@ -20,7 +20,8 @@ import (
 
 	"akkvstore/internal/auth"
 
-	_ "modernc.org/sqlite"
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 var (
@@ -42,6 +43,8 @@ var (
 	ErrTooLarge = errors.New("value too large")
 	// ErrPreconditionFailed 表示写入前置条件不成立。
 	ErrPreconditionFailed = errors.New("precondition failed")
+	// ErrDatabaseBusy 表示 SQLite 等待写锁超时，可稍后重试。
+	ErrDatabaseBusy = errors.New("database busy")
 )
 
 var (
@@ -57,6 +60,17 @@ const (
 	defaultQueryLimit  = 100
 	maxQueryLimit      = 500
 	maxQueryValueBytes = 32 << 20
+
+	sqliteMaxOpenConns           = 10
+	sqliteMaxIdleConns           = 2
+	projectDBCacheLimit          = 32
+	projectDBIdleTTL             = 5 * time.Minute
+	projectDBJanitorInterval     = 30 * time.Second
+	tokenStatsFlushInterval      = time.Second
+	tokenStatsAccessRetentionSec = 10 * 60
+	authCacheTTL                 = 30 * time.Second
+	authCacheLimit               = 2048
+	tableRouteCacheLimit         = 4096
 
 	currentProjectSchemaVersion = 2
 	currentSystemSchemaVersion  = 6
@@ -114,6 +128,11 @@ type Table struct {
 	KeyCount  int64
 	CreatedAt int64
 	UpdatedAt int64
+}
+
+type tableRouteKey struct {
+	projectID int64
+	name      string
 }
 
 // TableSummary 在 Table 基础上附带当前 key 数量。
@@ -176,14 +195,17 @@ type RecordQuery struct {
 	UpdatedBefore  int64
 	IncludeDeleted bool
 	IncludeValues  bool
-	Limit          int
-	Offset         int
+	// ValuePreviewBytes 大于 0 时只返回 value 的前若干字节。
+	ValuePreviewBytes int
+	Limit             int
+	Offset            int
 }
 
 // Record 是查询结果中的一条记录。
 type Record struct {
 	KeyMeta
-	Value []byte
+	Value             []byte
+	ValuePreviewError error `json:"-"`
 }
 
 // RecordQueryResult 是分页查询结果。
@@ -205,6 +227,12 @@ type nopReadSeekCloser struct {
 
 func (nopReadSeekCloser) Close() error { return nil }
 
+type projectDBHandle struct {
+	db       *sql.DB
+	refs     int
+	lastUsed time.Time
+}
+
 // Store 封装 system.db、project.db 与外部大文件存储。
 type Store struct {
 	systemDB        *sql.DB
@@ -213,8 +241,34 @@ type Store struct {
 	inlineThreshold int64
 	maxValueBytes   int64
 
-	// 文件与数据库之间的操作需要串行化；project 创建和删除使用写锁。
-	writeMu sync.RWMutex
+	// project 创建/删除只阻塞连接获取，普通表读写直接交给 SQLite。
+	projectLifecycleMu sync.RWMutex
+	projectDBsMu       sync.Mutex
+	projectDBs         map[int64]*projectDBHandle
+	projectDBCond      *sync.Cond
+	projectJanitorStop chan struct{}
+	projectJanitorDone chan struct{}
+	closed             bool
+	closeOnce          sync.Once
+	closeErr           error
+	blobLifecycleMu    sync.RWMutex
+
+	// 访问统计先累积在内存中，再由后台批量写入 system.db。
+	tokenStatsMu      sync.Mutex
+	tokenStatsFlushMu sync.Mutex
+	pendingAccess     map[int64]*tokenAccessDelta
+	pendingWrites     map[int64]int64
+	tokenStatsStop    chan struct{}
+	tokenStatsDone    chan struct{}
+
+	authCacheMu         sync.RWMutex
+	authCache           map[authCacheKey]authCacheEntry
+	authCacheGeneration uint64
+
+	tableRouteMu         sync.RWMutex
+	tableRoutes          map[tableRouteKey]Table
+	tableRouteGeneration uint64
+
 	// 访问压力分钟桶按分钟做一次清理，避免每次请求都执行 DELETE。
 	lastUsageCleanup atomic.Int64
 }
@@ -278,7 +332,13 @@ func Open(opts Options) (*Store, error) {
 		projectsDir:     projectsDir,
 		inlineThreshold: opts.InlineThreshold,
 		maxValueBytes:   opts.MaxValueBytes,
+		projectDBs:      make(map[int64]*projectDBHandle),
+		pendingAccess:   make(map[int64]*tokenAccessDelta),
+		pendingWrites:   make(map[int64]int64),
+		authCache:       make(map[authCacheKey]authCacheEntry),
+		tableRoutes:     make(map[tableRouteKey]Table),
 	}
+	s.projectDBCond = sync.NewCond(&s.projectDBsMu)
 	if err := s.initSystemSchema(); err != nil {
 		systemDB.Close()
 		return nil, err
@@ -291,6 +351,7 @@ func Open(opts Options) (*Store, error) {
 		systemDB.Close()
 		return nil, err
 	}
+	s.startBackgroundWorkers()
 	return s, nil
 }
 
@@ -299,9 +360,10 @@ func openSQLite(dbPath string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 单写连接：SQLite 写入串行化，避免 writer 竞争带来的 SQLITE_BUSY。
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	// 多连接允许 WAL 下并发读；写事务由 SQLite 文件锁和 BEGIN IMMEDIATE 排队。
+	db.SetMaxOpenConns(sqliteMaxOpenConns)
+	db.SetMaxIdleConns(sqliteMaxIdleConns)
+	db.SetConnMaxLifetime(0)
 
 	mustExec := func(q string) error {
 		if _, err := db.Exec(q); err != nil {
@@ -318,8 +380,8 @@ func openSQLite(dbPath string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("enable WAL: %w", err)
 	}
-	// FULL 保证每次提交都落到磁盘；进程崩溃/断电不会丢失已确认的写入。
-	if err := mustExec(`PRAGMA synchronous = FULL`); err != nil {
+	// 速度优先：提交不等待磁盘同步。
+	if err := mustExec(`PRAGMA synchronous = OFF`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -335,10 +397,20 @@ func sqliteDSN(dbPath string) string {
 	u := &url.URL{Scheme: "file", Path: dbPath}
 	q := u.Query()
 	q.Add("_pragma", "busy_timeout(5000)")
-	q.Add("_pragma", "journal_mode(WAL)")
-	q.Add("_pragma", "synchronous(FULL)")
+	q.Add("_pragma", "synchronous(OFF)")
+	q.Add("_txlock", "immediate")
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// IsDatabaseBusy 判断错误是否来自 SQLite 的 BUSY/LOCKED。
+func IsDatabaseBusy(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	code := sqliteErr.Code() & 0xff
+	return code == int(sqlite3.SQLITE_BUSY) || code == int(sqlite3.SQLITE_LOCKED)
 }
 
 func (s *Store) initSystemSchema() error {
@@ -678,9 +750,26 @@ func (s *Store) cleanupTableBlobs(db *sql.DB, p Project, table Table) error {
 	return nil
 }
 
-// Close 关闭系统数据库。
+// Close 停止后台任务、刷新统计并关闭所有 SQLite 连接。
 func (s *Store) Close() error {
-	return s.systemDB.Close()
+	s.closeOnce.Do(func() {
+		s.projectLifecycleMu.Lock()
+		defer s.projectLifecycleMu.Unlock()
+
+		close(s.tokenStatsStop)
+		<-s.tokenStatsDone
+		if err := s.flushTokenStats(); err != nil {
+			s.closeErr = fmt.Errorf("flush token stats: %w", err)
+		}
+
+		close(s.projectJanitorStop)
+		<-s.projectJanitorDone
+		s.closeProjectDBs()
+		if err := s.systemDB.Close(); err != nil && s.closeErr == nil {
+			s.closeErr = err
+		}
+	})
+	return s.closeErr
 }
 
 // Ping 用于健康检查。
@@ -698,6 +787,185 @@ func (s *Store) MaxValueBytes() int64 {
 	return s.maxValueBytes
 }
 
+func (s *Store) startBackgroundWorkers() {
+	s.projectJanitorStop = make(chan struct{})
+	s.projectJanitorDone = make(chan struct{})
+	go func() {
+		defer close(s.projectJanitorDone)
+		ticker := time.NewTicker(projectDBJanitorInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				s.closeIdleProjectDBs(time.Now())
+			case <-s.projectJanitorStop:
+				return
+			}
+		}
+	}()
+
+	s.tokenStatsStop = make(chan struct{})
+	s.tokenStatsDone = make(chan struct{})
+	go func() {
+		defer close(s.tokenStatsDone)
+		ticker := time.NewTicker(tokenStatsFlushInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := s.flushTokenStats(); err != nil {
+					// 统计允许延迟；失败时增量会放回内存，下个周期重试。
+					continue
+				}
+			case <-s.tokenStatsStop:
+				return
+			}
+		}
+	}()
+}
+
+func (s *Store) acquireProjectDB(p Project) (*sql.DB, func(), error) {
+	now := time.Now()
+
+	s.projectLifecycleMu.RLock()
+	defer s.projectLifecycleMu.RUnlock()
+
+	s.projectDBsMu.Lock()
+	if s.closed {
+		s.projectDBsMu.Unlock()
+		return nil, nil, fmt.Errorf("store is closed")
+	}
+	if handle := s.projectDBs[p.ID]; handle != nil {
+		handle.refs++
+		handle.lastUsed = now
+		db := handle.db
+		s.projectDBsMu.Unlock()
+		return db, s.projectDBRelease(handle), nil
+	}
+	s.projectDBsMu.Unlock()
+
+	if err := s.ensureProjectExists(p.ID); err != nil {
+		return nil, nil, err
+	}
+	db, err := s.openProjectDB(p)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	s.projectDBsMu.Lock()
+	if s.closed {
+		s.projectDBsMu.Unlock()
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("store is closed")
+	}
+	if handle := s.projectDBs[p.ID]; handle != nil {
+		handle.refs++
+		handle.lastUsed = now
+		cached := handle.db
+		s.projectDBsMu.Unlock()
+		_ = db.Close()
+		return cached, s.projectDBRelease(handle), nil
+	}
+	evicted := s.makeProjectDBRoomLocked()
+	handle := &projectDBHandle{db: db, refs: 1, lastUsed: now}
+	s.projectDBs[p.ID] = handle
+	s.projectDBsMu.Unlock()
+	for _, old := range evicted {
+		_ = old.Close()
+	}
+	return db, s.projectDBRelease(handle), nil
+}
+
+func (s *Store) makeProjectDBRoomLocked() []*sql.DB {
+	var evicted []*sql.DB
+	for len(s.projectDBs) >= projectDBCacheLimit {
+		var (
+			oldestID     int64
+			oldestHandle *projectDBHandle
+		)
+		for id, handle := range s.projectDBs {
+			if handle.refs > 0 {
+				continue
+			}
+			if oldestHandle == nil || handle.lastUsed.Before(oldestHandle.lastUsed) {
+				oldestID = id
+				oldestHandle = handle
+			}
+		}
+		if oldestHandle == nil {
+			break
+		}
+		delete(s.projectDBs, oldestID)
+		evicted = append(evicted, oldestHandle.db)
+	}
+	return evicted
+}
+
+func (s *Store) projectDBRelease(handle *projectDBHandle) func() {
+	return func() {
+		s.projectDBsMu.Lock()
+		handle.refs--
+		handle.lastUsed = time.Now()
+		s.projectDBCond.Broadcast()
+		s.projectDBsMu.Unlock()
+	}
+}
+
+func (s *Store) closeIdleProjectDBs(now time.Time) {
+	var closeList []*sql.DB
+	s.projectDBsMu.Lock()
+	for id, handle := range s.projectDBs {
+		if handle.refs == 0 && now.Sub(handle.lastUsed) >= projectDBIdleTTL {
+			delete(s.projectDBs, id)
+			closeList = append(closeList, handle.db)
+		}
+	}
+	s.projectDBsMu.Unlock()
+	for _, db := range closeList {
+		_ = db.Close()
+	}
+}
+
+func (s *Store) removeProjectDB(id int64) {
+	s.projectDBsMu.Lock()
+	handle := s.projectDBs[id]
+	delete(s.projectDBs, id)
+	for handle != nil && handle.refs > 0 {
+		s.projectDBCond.Wait()
+	}
+	s.projectDBsMu.Unlock()
+	if handle != nil {
+		_ = handle.db.Close()
+	}
+}
+
+func (s *Store) closeProjectDBs() {
+	s.projectDBsMu.Lock()
+	s.closed = true
+	handles := make([]*projectDBHandle, 0, len(s.projectDBs))
+	for id, handle := range s.projectDBs {
+		handles = append(handles, handle)
+		delete(s.projectDBs, id)
+	}
+	for {
+		active := false
+		for _, handle := range handles {
+			if handle.refs > 0 {
+				active = true
+				break
+			}
+		}
+		if !active {
+			break
+		}
+		s.projectDBCond.Wait()
+	}
+	s.projectDBsMu.Unlock()
+	for _, handle := range handles {
+		_ = handle.db.Close()
+	}
+}
+
 func (s *Store) projectDir(projectID int64) string {
 	return filepath.Join(s.projectsDir, strconv.FormatInt(projectID, 10))
 }
@@ -708,6 +976,26 @@ func (s *Store) projectDBPath(projectID int64) string {
 
 func (s *Store) tableBlobDir(p Project, table Table) string {
 	return filepath.Join(s.projectDir(p.ID), "blobs", strconv.FormatInt(table.ID, 10))
+}
+
+func (s *Store) removeBlobIfUnreferenced(db *sql.DB, p Project, table Table, hash string) {
+	if !blobFileRe.MatchString(hash) {
+		return
+	}
+	s.blobLifecycleMu.Lock()
+	defer s.blobLifecycleMu.Unlock()
+	var refs int64
+	q := fmt.Sprintf(`SELECT COUNT(*) FROM "%s" WHERE blob_hash = ?`, table.TableName)
+	if err := db.QueryRow(q, hash).Scan(&refs); err != nil || refs > 0 {
+		return
+	}
+	_ = os.Remove(filepath.Join(s.tableBlobDir(p, table), hash))
+}
+
+func (s *Store) removeBlobDir(path string) {
+	s.blobLifecycleMu.Lock()
+	defer s.blobLifecycleMu.Unlock()
+	_ = os.RemoveAll(path)
 }
 
 func dataTableName(tableID int64) string {
@@ -731,6 +1019,19 @@ func dataTableSQL(table string) string {
 
 type sqlExecer interface {
 	Exec(string, ...any) (sql.Result, error)
+}
+
+type sqlQueryer interface {
+	Query(string, ...any) (*sql.Rows, error)
+}
+
+type sqlRowQueryer interface {
+	QueryRow(string, ...any) *sql.Row
+}
+
+type sqlQueryRouter interface {
+	sqlQueryer
+	sqlRowQueryer
 }
 
 func createDataTableSchema(execer sqlExecer, table string) error {
@@ -928,8 +1229,8 @@ func (s *Store) CreateProject(name string) (Project, string, error) {
 		return Project{}, "", fmt.Errorf("%w: project 名称只能包含字母、数字、下划线、短横线，且以字母或数字开头，最长 32 字符", ErrInvalid)
 	}
 
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	s.projectLifecycleMu.Lock()
+	defer s.projectLifecycleMu.Unlock()
 
 	token, err := auth.GenerateToken()
 	if err != nil {
@@ -980,13 +1281,23 @@ func (s *Store) CreateProject(name string) (Project, string, error) {
 
 // GetProject 按名称查询 project。
 func (s *Store) GetProject(name string) (Project, error) {
-	s.writeMu.RLock()
-	defer s.writeMu.RUnlock()
 	return s.getProjectLocked(name)
 }
 
 func (s *Store) getProjectLocked(name string) (Project, error) {
 	p, err := scanProject(s.systemDB.QueryRow(`SELECT id, name, created_at, updated_at
+		FROM projects WHERE name = ? COLLATE NOCASE`, name))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Project{}, ErrNotFound
+	}
+	if err != nil {
+		return Project{}, err
+	}
+	return p, nil
+}
+
+func getProjectTx(tx *sql.Tx, name string) (Project, error) {
+	p, err := scanProject(tx.QueryRow(`SELECT id, name, created_at, updated_at
 		FROM projects WHERE name = ? COLLATE NOCASE`, name))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Project{}, ErrNotFound
@@ -1020,8 +1331,9 @@ func (s *Store) listProjectsLocked() ([]Project, error) {
 
 // ListProjects 返回全部 project 及 table、key 数量。
 func (s *Store) ListProjects() ([]ProjectSummary, error) {
-	s.writeMu.RLock()
-	defer s.writeMu.RUnlock()
+	if err := s.flushTokenStats(); err != nil {
+		return nil, err
+	}
 
 	projects, err := s.listProjectsLocked()
 	if err != nil {
@@ -1084,11 +1396,11 @@ func (s *Store) ListProjects() ([]ProjectSummary, error) {
 }
 
 func (s *Store) projectStats(p Project) (int64, int64, error) {
-	db, err := s.openProjectDB(p)
+	db, release, err := s.acquireProjectDB(p)
 	if err != nil {
 		return 0, 0, err
 	}
-	defer db.Close()
+	defer release()
 	tables, err := s.listTablesLocked(db)
 	if err != nil {
 		return 0, 0, err
@@ -1102,8 +1414,11 @@ func (s *Store) projectStats(p Project) (int64, int64, error) {
 
 // DeleteProject 删除 system.db 记录和整个 project 目录。
 func (s *Store) DeleteProject(name string) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	if err := s.flushTokenStats(); err != nil {
+		return err
+	}
+	s.projectLifecycleMu.Lock()
+	defer s.projectLifecycleMu.Unlock()
 
 	p, err := s.getProjectLocked(name)
 	if err != nil {
@@ -1129,6 +1444,9 @@ func (s *Store) DeleteProject(name string) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	s.clearAuthCache()
+	s.clearTableRoutes()
+	s.removeProjectDB(p.ID)
 	// 项目记录已经删除；目录清理失败只留下无主文件，启动时会再次清理。
 	_ = os.RemoveAll(s.projectDir(p.ID))
 	return nil
@@ -1145,16 +1463,11 @@ func (s *Store) CreateTable(p Project, name string) (Table, error) {
 	if !ValidateTableName(name) {
 		return Table{}, fmt.Errorf("%w: table 名称只能是小写字母、数字、下划线、短横线，且以字母或数字开头，最长 32 字符", ErrInvalid)
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	if err := s.ensureProjectExists(p.ID); err != nil {
-		return Table{}, err
-	}
-	db, err := s.openProjectDB(p)
+	db, release, err := s.acquireProjectDB(p)
 	if err != nil {
 		return Table{}, err
 	}
-	defer db.Close()
+	defer release()
 	tx, err := db.Begin()
 	if err != nil {
 		return Table{}, err
@@ -1173,21 +1486,17 @@ func (s *Store) CreateTable(p Project, name string) (Table, error) {
 	if err := tx.Commit(); err != nil {
 		return Table{}, err
 	}
+	s.clearTableRoutes()
 	return table, nil
 }
 
 // ListTables 返回 project 内的全部 table 及 key 数量。
 func (s *Store) ListTables(p Project) ([]TableSummary, error) {
-	s.writeMu.RLock()
-	defer s.writeMu.RUnlock()
-	if err := s.ensureProjectExists(p.ID); err != nil {
-		return nil, err
-	}
-	db, err := s.openProjectDB(p)
+	db, release, err := s.acquireProjectDB(p)
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
+	defer release()
 	tables, err := s.listTablesLocked(db)
 	if err != nil {
 		return nil, err
@@ -1199,7 +1508,7 @@ func (s *Store) ListTables(p Project) ([]TableSummary, error) {
 	return out, nil
 }
 
-func (s *Store) listTablesLocked(db *sql.DB) ([]Table, error) {
+func (s *Store) listTablesLocked(db sqlQueryer) ([]Table, error) {
 	rows, err := db.Query(`SELECT id, name, table_name, key_count, created_at, updated_at
 		FROM kv_tables ORDER BY name`)
 	if err != nil {
@@ -1237,16 +1546,11 @@ func (s *Store) GetTable(p Project, name string) (Table, error) {
 	if !ValidateTableName(name) {
 		return Table{}, fmt.Errorf("%w: table 名称不合法", ErrInvalid)
 	}
-	s.writeMu.RLock()
-	defer s.writeMu.RUnlock()
-	if err := s.ensureProjectExists(p.ID); err != nil {
-		return Table{}, err
-	}
-	db, err := s.openProjectDB(p)
+	db, release, err := s.acquireProjectDB(p)
 	if err != nil {
 		return Table{}, err
 	}
-	defer db.Close()
+	defer release()
 	return getTable(db, name)
 }
 
@@ -1255,16 +1559,11 @@ func (s *Store) GetTableSummary(p Project, name string) (TableSummary, error) {
 	if !ValidateTableName(name) {
 		return TableSummary{}, fmt.Errorf("%w: table 名称不合法", ErrInvalid)
 	}
-	s.writeMu.RLock()
-	defer s.writeMu.RUnlock()
-	if err := s.ensureProjectExists(p.ID); err != nil {
-		return TableSummary{}, err
-	}
-	db, err := s.openProjectDB(p)
+	db, release, err := s.acquireProjectDB(p)
 	if err != nil {
 		return TableSummary{}, err
 	}
-	defer db.Close()
+	defer release()
 	table, err := getTable(db, name)
 	if err != nil {
 		return TableSummary{}, err
@@ -1277,16 +1576,11 @@ func (s *Store) DeleteTable(p Project, name string) error {
 	if !ValidateTableName(name) {
 		return fmt.Errorf("%w: table 名称不合法", ErrInvalid)
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	if err := s.ensureProjectExists(p.ID); err != nil {
-		return err
-	}
-	db, err := s.openProjectDB(p)
+	db, release, err := s.acquireProjectDB(p)
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer release()
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -1305,7 +1599,8 @@ func (s *Store) DeleteTable(p Project, name string) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	_ = os.RemoveAll(s.tableBlobDir(p, table))
+	s.clearTableRoutes()
+	s.removeBlobDir(s.tableBlobDir(p, table))
 	return nil
 }
 
@@ -1316,6 +1611,44 @@ func getTable(db *sql.DB, name string) (Table, error) {
 		return Table{}, ErrTableNotFound
 	}
 	return table, err
+}
+
+func (s *Store) getTableRoute(db sqlRowQueryer, p Project, name string) (Table, error) {
+	key := tableRouteKey{projectID: p.ID, name: name}
+
+	s.tableRouteMu.RLock()
+	table, cached := s.tableRoutes[key]
+	generation := s.tableRouteGeneration
+	s.tableRouteMu.RUnlock()
+	if cached {
+		return table, nil
+	}
+
+	table, err := scanTable(db.QueryRow(`SELECT id, name, table_name, 0, created_at, 0
+		FROM kv_tables WHERE name = ?`, name))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Table{}, ErrTableNotFound
+	}
+	if err != nil {
+		return Table{}, err
+	}
+
+	s.tableRouteMu.Lock()
+	if s.tableRouteGeneration == generation {
+		if len(s.tableRoutes) >= tableRouteCacheLimit {
+			s.tableRoutes = make(map[tableRouteKey]Table)
+		}
+		s.tableRoutes[key] = table
+	}
+	s.tableRouteMu.Unlock()
+	return table, nil
+}
+
+func (s *Store) clearTableRoutes() {
+	s.tableRouteMu.Lock()
+	s.tableRouteGeneration++
+	s.tableRoutes = make(map[tableRouteKey]Table)
+	s.tableRouteMu.Unlock()
 }
 
 func getTableTx(tx *sql.Tx, name string) (Table, error) {

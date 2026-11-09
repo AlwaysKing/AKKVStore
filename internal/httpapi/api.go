@@ -85,6 +85,10 @@ func (a *API) authenticate(
 			writeError(w, http.StatusUnauthorized, "unauthorized", "project 或 token 不正确")
 			return store.Project{}, store.ProjectToken{}, false
 		}
+		if store.IsDatabaseBusy(err) {
+			writeError(w, http.StatusServiceUnavailable, "database_busy", "数据库繁忙，请稍后重试")
+			return store.Project{}, store.ProjectToken{}, false
+		}
 		a.log.Error("verify token", "project", project, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "服务内部错误")
 		return store.Project{}, store.ProjectToken{}, false

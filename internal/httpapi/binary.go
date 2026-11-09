@@ -78,6 +78,8 @@ func (a *API) handleUpload(w http.ResponseWriter, r *http.Request) {
 		case errors.As(err, &maxBytesErr), errors.Is(err, store.ErrTooLarge):
 			writeError(w, http.StatusRequestEntityTooLarge, "too_large",
 				fmt.Sprintf("value 不能超过 %d 字节", a.maxValueBytes))
+		case store.IsDatabaseBusy(err):
+			writeError(w, http.StatusServiceUnavailable, "database_busy", "数据库繁忙，请稍后重试")
 		case errors.Is(err, store.ErrInvalid):
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		case errors.Is(err, store.ErrNotFound):
@@ -125,6 +127,8 @@ func (a *API) handleDownload(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "table_not_found", "table 不存在")
 		case errors.Is(err, store.ErrNotFound):
 			writeError(w, http.StatusNotFound, "not_found", "key 不存在")
+		case store.IsDatabaseBusy(err):
+			writeError(w, http.StatusServiceUnavailable, "database_busy", "数据库繁忙，请稍后重试")
 		case errors.Is(err, store.ErrInvalid):
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		default:

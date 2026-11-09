@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -38,6 +39,72 @@ func (s *Store) PutKeyConditional(
 	return s.putKey(p, tableName, key, contentType, r, updatedAt, condition, false)
 }
 
+type stagedValue struct {
+	inline   []byte
+	tempPath string
+	hashHex  string
+	size     int64
+}
+
+func (s *Store) stageValue(r io.Reader) (stagedValue, error) {
+	var src io.Reader = r
+	if s.maxValueBytes > 0 {
+		src = io.LimitReader(r, s.maxValueBytes+1)
+	}
+
+	h := sha256.New()
+	tee := io.TeeReader(src, h)
+	buf := make([]byte, 128<<10)
+	var inline bytes.Buffer
+	inlineSize, err := io.CopyBuffer(&inline, io.LimitReader(tee, s.inlineThreshold+1), buf)
+	if err != nil {
+		return stagedValue{}, err
+	}
+	if s.maxValueBytes > 0 && inlineSize > s.maxValueBytes {
+		return stagedValue{}, ErrTooLarge
+	}
+	if inlineSize <= s.inlineThreshold {
+		return stagedValue{
+			inline:  inline.Bytes(),
+			hashHex: hex.EncodeToString(h.Sum(nil)),
+			size:    inlineSize,
+		}, nil
+	}
+
+	tmp, err := os.CreateTemp(filepath.Join(s.dataDir, "tmp"), "put-*")
+	if err != nil {
+		return stagedValue{}, err
+	}
+	tmpPath := tmp.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(inline.Bytes()); err != nil {
+		return stagedValue{}, err
+	}
+	remaining, err := io.CopyBuffer(tmp, tee, buf)
+	if err != nil {
+		return stagedValue{}, err
+	}
+	size := inlineSize + remaining
+	if s.maxValueBytes > 0 && size > s.maxValueBytes {
+		return stagedValue{}, ErrTooLarge
+	}
+	if err := tmp.Close(); err != nil {
+		return stagedValue{}, err
+	}
+	ok = true
+	return stagedValue{
+		tempPath: tmpPath,
+		hashHex:  hex.EncodeToString(h.Sum(nil)),
+		size:     size,
+	}, nil
+}
+
 func (s *Store) putKey(
 	p Project,
 	tableName, key string,
@@ -63,50 +130,27 @@ func (s *Store) putKey(
 		return KeyMeta{}, err
 	}
 
-	tmp, err := os.CreateTemp(filepath.Join(s.dataDir, "tmp"), "put-*")
+	staged, err := s.stageValue(r)
 	if err != nil {
 		return KeyMeta{}, err
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-
-	h := sha256.New()
-	var src io.Reader = r
-	if s.maxValueBytes > 0 {
-		src = io.LimitReader(r, s.maxValueBytes+1)
+	if staged.tempPath != "" {
+		defer os.Remove(staged.tempPath)
 	}
-	buf := make([]byte, 128<<10)
-	size, err := io.CopyBuffer(tmp, io.TeeReader(src, h), buf)
-	if err != nil {
-		tmp.Close()
-		return KeyMeta{}, err
-	}
-	if s.maxValueBytes > 0 && size > s.maxValueBytes {
-		tmp.Close()
-		return KeyMeta{}, ErrTooLarge
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return KeyMeta{}, err
-	}
-	if err := tmp.Close(); err != nil {
-		return KeyMeta{}, err
-	}
-
-	hashHex := hex.EncodeToString(h.Sum(nil))
 	now := time.Now().UnixMilli()
 
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	if err := s.ensureProjectExists(p.ID); err != nil {
-		return KeyMeta{}, err
-	}
-	db, err := s.openProjectDB(p)
+	db, release, err := s.acquireProjectDB(p)
 	if err != nil {
 		return KeyMeta{}, err
 	}
-	defer db.Close()
+	defer release()
+	s.blobLifecycleMu.RLock()
+	blobLocked := true
+	defer func() {
+		if blobLocked {
+			s.blobLifecycleMu.RUnlock()
+		}
+	}()
 	tx, err := db.Begin()
 	if err != nil {
 		return KeyMeta{}, err
@@ -138,37 +182,31 @@ func (s *Store) putKey(
 		blobHash    sql.NullString
 		createdBlob bool
 	)
-	if size <= s.inlineThreshold {
-		value, err = os.ReadFile(tmpName)
-		if err != nil {
-			return KeyMeta{}, err
-		}
-	} else {
+	value = staged.inline
+	if staged.tempPath != "" {
 		blobDir, err := s.ensureTableBlobDir(p, table)
 		if err != nil {
 			return KeyMeta{}, err
 		}
-		finalPath := filepath.Join(blobDir, hashHex)
+		finalPath := filepath.Join(blobDir, staged.hashHex)
 		if _, statErr := os.Stat(finalPath); errors.Is(statErr, os.ErrNotExist) {
-			if err := os.Rename(tmpName, finalPath); err != nil {
+			if err := os.Rename(staged.tempPath, finalPath); err != nil {
 				return KeyMeta{}, err
 			}
 			createdBlob = true
-			// 目录项落盘后才能提交数据库；否则断电后可能出现 DB 已提交但文件不可见。
-			if err := syncDir(blobDir); err != nil {
-				_ = os.Remove(finalPath)
-				return KeyMeta{}, err
-			}
 		} else if statErr != nil {
 			return KeyMeta{}, statErr
 		}
-		blobHash = sql.NullString{String: hashHex, Valid: true}
+		blobHash = sql.NullString{String: staged.hashHex, Valid: true}
 	}
 
-	meta, removeOld, err := s.upsertLocked(tx, p, table, key, contentType, hashHex, value, blobHash, size, now, updatedAt, state)
+	meta, removeOld, err := s.upsertLocked(
+		tx, p, table, key, contentType, staged.hashHex, value, blobHash,
+		staged.size, now, updatedAt, state,
+	)
 	if err != nil {
 		if createdBlob {
-			_ = os.Remove(filepath.Join(s.tableBlobDir(p, table), hashHex))
+			_ = os.Remove(filepath.Join(s.tableBlobDir(p, table), staged.hashHex))
 		}
 		if tableCreated {
 			_ = os.RemoveAll(s.tableBlobDir(p, table))
@@ -177,15 +215,19 @@ func (s *Store) putKey(
 	}
 	if err := tx.Commit(); err != nil {
 		if createdBlob {
-			_ = os.Remove(filepath.Join(s.tableBlobDir(p, table), hashHex))
+			_ = os.Remove(filepath.Join(s.tableBlobDir(p, table), staged.hashHex))
 		}
 		if tableCreated {
 			_ = os.RemoveAll(s.tableBlobDir(p, table))
 		}
 		return KeyMeta{}, err
 	}
+	if blobLocked {
+		s.blobLifecycleMu.RUnlock()
+		blobLocked = false
+	}
 	if removeOld != "" {
-		_ = os.Remove(filepath.Join(s.tableBlobDir(p, table), removeOld))
+		s.removeBlobIfUnreferenced(db, p, table, removeOld)
 	}
 	return meta, nil
 }
@@ -193,24 +235,12 @@ func (s *Store) putKey(
 func (s *Store) ensureTableBlobDir(p Project, table Table) (string, error) {
 	projectDir := s.projectDir(p.ID)
 	blobsDir := filepath.Join(projectDir, "blobs")
-	createdBlobs, err := ensureDir(blobsDir)
-	if err != nil {
+	if _, err := ensureDir(blobsDir); err != nil {
 		return "", err
-	}
-	if createdBlobs {
-		if err := syncDir(projectDir); err != nil {
-			return "", err
-		}
 	}
 	tableDir := s.tableBlobDir(p, table)
-	createdTable, err := ensureDir(tableDir)
-	if err != nil {
+	if _, err := ensureDir(tableDir); err != nil {
 		return "", err
-	}
-	if createdTable {
-		if err := syncDir(blobsDir); err != nil {
-			return "", err
-		}
 	}
 	return tableDir, nil
 }
@@ -260,7 +290,10 @@ func (s *Store) upsertLocked(
 	}
 
 	var inline any
-	if value != nil {
+	if !blobHash.Valid {
+		if value == nil {
+			value = []byte{}
+		}
 		inline = value
 	}
 	var external any
@@ -373,17 +406,14 @@ func (s *Store) GetKey(p Project, tableName, key string) (KeyMeta, ReadSeekClose
 	if err := ValidateKey(key); err != nil {
 		return KeyMeta{}, nil, err
 	}
-	s.writeMu.RLock()
-	defer s.writeMu.RUnlock()
-	if err := s.ensureProjectExists(p.ID); err != nil {
-		return KeyMeta{}, nil, err
-	}
-	db, err := s.openProjectDB(p)
+	db, release, err := s.acquireProjectDB(p)
 	if err != nil {
 		return KeyMeta{}, nil, err
 	}
-	defer db.Close()
-	table, err := getTable(db, tableName)
+	defer release()
+	s.blobLifecycleMu.RLock()
+	defer s.blobLifecycleMu.RUnlock()
+	table, err := s.getTableRoute(db, p, tableName)
 	if err != nil {
 		return KeyMeta{}, nil, err
 	}
@@ -467,16 +497,11 @@ func (s *Store) RenameKey(p Project, tableName, oldKey, newKey string) (KeyMeta,
 		return meta, nil
 	}
 
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	if err := s.ensureProjectExists(p.ID); err != nil {
-		return KeyMeta{}, err
-	}
-	db, err := s.openProjectDB(p)
+	db, release, err := s.acquireProjectDB(p)
 	if err != nil {
 		return KeyMeta{}, err
 	}
-	defer db.Close()
+	defer release()
 	tx, err := db.Begin()
 	if err != nil {
 		return KeyMeta{}, err
@@ -597,16 +622,11 @@ func (s *Store) UpdateKeyValueType(
 		return KeyMeta{}, fmt.Errorf("%w: updatedAt 必须是正整数 Unix 毫秒时间戳", ErrInvalid)
 	}
 
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	if err := s.ensureProjectExists(p.ID); err != nil {
-		return KeyMeta{}, err
-	}
-	db, err := s.openProjectDB(p)
+	db, release, err := s.acquireProjectDB(p)
 	if err != nil {
 		return KeyMeta{}, err
 	}
-	defer db.Close()
+	defer release()
 	tx, err := db.Begin()
 	if err != nil {
 		return KeyMeta{}, err
@@ -672,16 +692,18 @@ func (s *Store) DeleteKeyConditional(
 		return KeyMeta{}, err
 	}
 
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	if err := s.ensureProjectExists(p.ID); err != nil {
-		return KeyMeta{}, err
-	}
-	db, err := s.openProjectDB(p)
+	db, release, err := s.acquireProjectDB(p)
 	if err != nil {
 		return KeyMeta{}, err
 	}
-	defer db.Close()
+	defer release()
+	s.blobLifecycleMu.RLock()
+	blobLocked := true
+	defer func() {
+		if blobLocked {
+			s.blobLifecycleMu.RUnlock()
+		}
+	}()
 	tx, err := db.Begin()
 	if err != nil {
 		return KeyMeta{}, err
@@ -698,8 +720,12 @@ func (s *Store) DeleteKeyConditional(
 	if err := tx.Commit(); err != nil {
 		return KeyMeta{}, err
 	}
+	if blobLocked {
+		s.blobLifecycleMu.RUnlock()
+		blobLocked = false
+	}
 	if removeBlob != "" {
-		_ = os.Remove(filepath.Join(s.tableBlobDir(p, table), removeBlob))
+		s.removeBlobIfUnreferenced(db, p, table, removeBlob)
 	}
 	return meta, nil
 }
@@ -787,6 +813,24 @@ func (s *Store) ListKeys(p Project, tableName, prefix string, limit, offset int)
 	return keys, result.Total, nil
 }
 
+// ListKeysWithPreview 返回当前页 key，并一次性读取有限长度的字符串预览。
+func (s *Store) ListKeysWithPreview(
+	p Project,
+	tableName, prefix string,
+	limit, offset, previewBytes int,
+) ([]Record, int64, error) {
+	result, err := s.QueryRecords(p, tableName, RecordQuery{
+		Prefix:            prefix,
+		Limit:             limit,
+		Offset:            offset,
+		ValuePreviewBytes: previewBytes,
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	return result.Records, result.Total, nil
+}
+
 // QueryRecords 按前缀、GLOB 和客户端修改时间查询 table 内记录。
 func (s *Store) QueryRecords(p Project, tableName string, query RecordQuery) (RecordQueryResult, error) {
 	if !ValidateTableName(tableName) {
@@ -808,17 +852,21 @@ func (s *Store) QueryRecords(p Project, tableName string, query RecordQuery) (Re
 		query.Offset = 0
 	}
 
-	s.writeMu.RLock()
-	defer s.writeMu.RUnlock()
-	if err := s.ensureProjectExists(p.ID); err != nil {
-		return RecordQueryResult{}, err
-	}
-	db, err := s.openProjectDB(p)
+	db, release, err := s.acquireProjectDB(p)
 	if err != nil {
 		return RecordQueryResult{}, err
 	}
-	defer db.Close()
-	table, err := getTable(db, tableName)
+	defer release()
+	if query.IncludeValues || query.ValuePreviewBytes > 0 {
+		s.blobLifecycleMu.RLock()
+		defer s.blobLifecycleMu.RUnlock()
+	}
+	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return RecordQueryResult{}, err
+	}
+	defer tx.Rollback()
+	table, err := s.getTableRoute(tx, p, tableName)
 	if err != nil {
 		return RecordQueryResult{}, err
 	}
@@ -826,15 +874,25 @@ func (s *Store) QueryRecords(p Project, tableName string, query RecordQuery) (Re
 	whereClause, args := recordWhere(query)
 	var total int64
 	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM "%s"%s`, table.TableName, whereClause)
-	if err := db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+	if err := tx.QueryRow(countQuery, args...).Scan(&total); err != nil {
 		return RecordQueryResult{}, err
 	}
 
-	q := fmt.Sprintf(`SELECT key, value, blob_hash, content_type, size, created_at, updated_at,
+	valueExpr := "NULL"
+	if query.ValuePreviewBytes > 0 && !query.IncludeValues {
+		previewBytes := query.ValuePreviewBytes
+		if previewBytes > maxQueryValueBytes {
+			previewBytes = maxQueryValueBytes
+		}
+		valueExpr = fmt.Sprintf("substr(value, 1, %d)", previewBytes)
+	} else if query.IncludeValues {
+		valueExpr = "value"
+	}
+	q := fmt.Sprintf(`SELECT key, %s, blob_hash, content_type, size, created_at, updated_at,
 		deleted, content_hash FROM "%s"%s ORDER BY key ASC LIMIT ? OFFSET ?`,
-		table.TableName, whereClause)
+		valueExpr, table.TableName, whereClause)
 	queryArgs := append(append([]any{}, args...), query.Limit, query.Offset)
-	rows, err := db.Query(q, queryArgs...)
+	rows, err := tx.Query(q, queryArgs...)
 	if err != nil {
 		return RecordQueryResult{}, err
 	}
@@ -883,13 +941,44 @@ func (s *Store) QueryRecords(p Project, tableName string, query RecordQuery) (Re
 			} else {
 				record.Value = append([]byte(nil), value...)
 			}
+		} else if query.ValuePreviewBytes > 0 && !record.Deleted &&
+			record.ContentType == ValueTypeString {
+			if blobHash.Valid {
+				if !blobFileRe.MatchString(blobHash.String) {
+					return RecordQueryResult{}, fmt.Errorf("%w: invalid blob hash", ErrInvalid)
+				}
+				data, err := readFilePrefix(
+					filepath.Join(s.tableBlobDir(p, table), blobHash.String),
+					int64(query.ValuePreviewBytes),
+				)
+				if err != nil {
+					record.ValuePreviewError = err
+				} else {
+					record.Value = data
+				}
+			} else {
+				record.Value = append([]byte(nil), value...)
+			}
 		}
 		result.Records = append(result.Records, record)
 	}
 	if err := rows.Err(); err != nil {
 		return RecordQueryResult{}, err
 	}
+	rows.Close()
+	if err := tx.Commit(); err != nil {
+		return RecordQueryResult{}, err
+	}
 	return result, nil
+}
+
+func readFilePrefix(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, limit))
 }
 
 func validateRecordQuery(query RecordQuery) error {

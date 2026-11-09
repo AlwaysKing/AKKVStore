@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -1713,5 +1714,335 @@ func TestStartupRejectsIncompatibleProjectSchema(t *testing.T) {
 	}
 	if _, err := Open(opts); err == nil || !strings.Contains(err.Error(), "incompatible") {
 		t.Fatalf("Open with incompatible schema err = %v", err)
+	}
+}
+
+func TestSmallValuesDoNotUseTemporaryFiles(t *testing.T) {
+	s, dataDir := openTestStore(t, 1<<20, 64)
+	p, _ := mustProject(t, s, "demo")
+
+	if _, err := s.PutKey(p, "small", "empty", ValueTypeString, strings.NewReader("")); err != nil {
+		t.Fatalf("PutKey empty: %v", err)
+	}
+	if _, err := s.PutKey(p, "small", "value", ValueTypeString, strings.NewReader("hello")); err != nil {
+		t.Fatalf("PutKey small: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(dataDir, "tmp"))
+	if err != nil {
+		t.Fatalf("ReadDir temp: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("small writes left temporary files: %v", entries)
+	}
+	meta, rc, err := s.GetKey(p, "small", "empty")
+	if err != nil {
+		t.Fatalf("GetKey empty: %v", err)
+	}
+	if meta.Size != 0 || meta.External {
+		t.Fatalf("empty meta = %+v", meta)
+	}
+	if got := mustRead(t, rc); got != "" {
+		t.Fatalf("empty value = %q", got)
+	}
+}
+
+func TestProjectDBConnectionIdleClose(t *testing.T) {
+	s, _ := openTestStore(t, 1<<20, 64)
+	p, _ := mustProject(t, s, "demo")
+	if _, err := s.PutKey(p, "hot", "k", ValueTypeString, strings.NewReader("value")); err != nil {
+		t.Fatalf("PutKey: %v", err)
+	}
+
+	s.projectDBsMu.Lock()
+	handle := s.projectDBs[p.ID]
+	if handle == nil {
+		s.projectDBsMu.Unlock()
+		t.Fatal("project DB was not cached")
+	}
+	handle.lastUsed = time.Now().Add(-projectDBIdleTTL - time.Second)
+	s.projectDBsMu.Unlock()
+
+	s.closeIdleProjectDBs(time.Now())
+	s.projectDBsMu.Lock()
+	_, cached := s.projectDBs[p.ID]
+	s.projectDBsMu.Unlock()
+	if cached {
+		t.Fatal("idle project DB was not evicted")
+	}
+
+	meta, rc, err := s.GetKey(p, "hot", "k")
+	if err != nil {
+		t.Fatalf("GetKey after idle close: %v", err)
+	}
+	if meta.Size != 5 {
+		t.Fatalf("size after reopen = %d", meta.Size)
+	}
+	if got := mustRead(t, rc); got != "value" {
+		t.Fatalf("value after reopen = %q", got)
+	}
+}
+
+func TestListKeysWithPreviewLimitsInlineValue(t *testing.T) {
+	s, _ := openTestStore(t, 1<<20, 2048)
+	p, _ := mustProject(t, s, "demo")
+	body := strings.Repeat("x", 1000)
+	if _, err := s.PutKey(p, "preview", "k", ValueTypeString, strings.NewReader(body)); err != nil {
+		t.Fatalf("PutKey: %v", err)
+	}
+
+	records, total, err := s.ListKeysWithPreview(p, "preview", "", 10, 0, 64)
+	if err != nil {
+		t.Fatalf("ListKeysWithPreview: %v", err)
+	}
+	if total != 1 || len(records) != 1 {
+		t.Fatalf("records=%d total=%d", len(records), total)
+	}
+	if len(records[0].Value) != 64 || records[0].Size != int64(len(body)) {
+		t.Fatalf("preview len=%d size=%d", len(records[0].Value), records[0].Size)
+	}
+}
+
+func TestConcurrentBlobReadsAndWrites(t *testing.T) {
+	s, _ := openTestStore(t, 1<<20, 32)
+	p, _ := mustProject(t, s, "demo")
+	valueA := strings.Repeat("a", 64<<10)
+	valueB := strings.Repeat("b", 64<<10)
+	if _, err := s.PutKey(p, "blobs", "k", ValueTypeString, strings.NewReader(valueA)); err != nil {
+		t.Fatalf("PutKey initial: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				_, rc, err := s.GetKey(p, "blobs", "k")
+				if err != nil {
+					errs <- err
+					return
+				}
+				body, err := io.ReadAll(rc)
+				_ = rc.Close()
+				if err != nil {
+					errs <- err
+					return
+				}
+				if len(body) != len(valueA) {
+					errs <- fmt.Errorf("blob length = %d, want %d", len(body), len(valueA))
+					return
+				}
+			}
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(offset int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				body := valueA
+				if (offset+j)%2 == 1 {
+					body = valueB
+				}
+				if _, err := s.PutKey(p, "blobs", "k", ValueTypeString, strings.NewReader(body)); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent blob operation: %v", err)
+		}
+	}
+}
+
+func TestDeleteProjectDoesNotDeadlockWithBlobWrite(t *testing.T) {
+	s, _ := openTestStore(t, 1<<20, 32)
+	p, _ := mustProject(t, s, "demo")
+	body := strings.Repeat("d", 64<<10)
+	if _, err := s.PutKey(p, "blobs", "k", ValueTypeString, strings.NewReader(body)); err != nil {
+		t.Fatalf("PutKey initial: %v", err)
+	}
+
+	writeDone := make(chan error, 1)
+	go func() {
+		for i := 0; i < 20; i++ {
+			if _, err := s.PutKey(p, "blobs", "k", ValueTypeString, strings.NewReader(body)); err != nil &&
+				!errors.Is(err, ErrNotFound) {
+				writeDone <- err
+				return
+			}
+		}
+		writeDone <- nil
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	if err := s.DeleteProject("demo"); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("concurrent PutKey: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent blob write and project delete deadlocked")
+	}
+}
+
+func TestProjectDBConnectionCacheLimit(t *testing.T) {
+	s, _ := openTestStore(t, 1<<20, 32)
+	for i := 0; i < projectDBCacheLimit+8; i++ {
+		p, _ := mustProject(t, s, fmt.Sprintf("project-%02d", i))
+		if _, err := s.ListTables(p); err != nil {
+			t.Fatalf("ListTables project %d: %v", i, err)
+		}
+	}
+	s.projectDBsMu.Lock()
+	cached := len(s.projectDBs)
+	s.projectDBsMu.Unlock()
+	if cached > projectDBCacheLimit {
+		t.Fatalf("cached project DBs = %d, want <= %d", cached, projectDBCacheLimit)
+	}
+}
+
+func TestCreateTokenCannotSurviveConcurrentProjectDelete(t *testing.T) {
+	s, _ := openTestStore(t, 1<<20, 32)
+	for round := 0; round < 5; round++ {
+		name := fmt.Sprintf("race-%02d", round)
+		p, _ := mustProject(t, s, name)
+		var wg sync.WaitGroup
+		errs := make(chan error, 8)
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, _, err := s.CreateProjectToken(name, "concurrent"); err != nil &&
+					!errors.Is(err, ErrNotFound) {
+					errs <- err
+				}
+			}()
+		}
+		time.Sleep(2 * time.Millisecond)
+		if err := s.DeleteProject(name); err != nil {
+			t.Fatalf("DeleteProject %q: %v", name, err)
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			t.Fatalf("concurrent token create: %v", err)
+		}
+		var count int
+		if err := s.systemDB.QueryRow(`SELECT COUNT(*) FROM project_tokens WHERE project_id = ?`, p.ID).Scan(&count); err != nil {
+			t.Fatalf("count orphan tokens: %v", err)
+		}
+		if count != 0 {
+			t.Fatalf("project %q has %d orphan tokens", name, count)
+		}
+	}
+}
+
+func TestListKeysWithPreviewToleratesMissingBlob(t *testing.T) {
+	s, _ := openTestStore(t, 1<<20, 16)
+	p, _ := mustProject(t, s, "demo")
+	meta, err := s.PutKey(p, "preview", "k", ValueTypeString, strings.NewReader(strings.Repeat("x", 100)))
+	if err != nil {
+		t.Fatalf("PutKey: %v", err)
+	}
+	if !meta.External {
+		t.Fatal("test value should be external")
+	}
+	table, err := s.GetTable(p, "preview")
+	if err != nil {
+		t.Fatalf("GetTable: %v", err)
+	}
+	if err := os.Remove(filepath.Join(s.tableBlobDir(p, table), meta.ContentHash)); err != nil {
+		t.Fatalf("remove blob: %v", err)
+	}
+	records, total, err := s.ListKeysWithPreview(p, table.Name, "", 10, 0, 64)
+	if err != nil {
+		t.Fatalf("ListKeysWithPreview: %v", err)
+	}
+	if total != 1 || len(records) != 1 || records[0].ValuePreviewError == nil {
+		t.Fatalf("preview records = %+v, total=%d", records, total)
+	}
+}
+
+func TestIsDatabaseBusy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "busy.db")
+	first, err := openSQLite(path)
+	if err != nil {
+		t.Fatalf("open first: %v", err)
+	}
+	defer first.Close()
+	second, err := openSQLite(path)
+	if err != nil {
+		t.Fatalf("open second: %v", err)
+	}
+	defer second.Close()
+	if _, err := second.Exec(`PRAGMA busy_timeout = 1`); err != nil {
+		t.Fatalf("set busy timeout: %v", err)
+	}
+	tx, err := first.Begin()
+	if err != nil {
+		t.Fatalf("begin first: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS busy_test (id INTEGER)`); err != nil {
+		t.Fatalf("write first: %v", err)
+	}
+	if _, err := second.Begin(); err == nil {
+		t.Fatal("second begin unexpectedly succeeded while first write transaction is active")
+	} else if !IsDatabaseBusy(err) {
+		t.Fatalf("busy error = %v", err)
+	}
+}
+
+func TestProjectDeleteInvalidatesAuthCache(t *testing.T) {
+	s, _ := openTestStore(t, 1<<20, 32)
+	_, token := mustProject(t, s, "demo")
+	if _, _, err := s.VerifyProjectToken("demo", token); err != nil {
+		t.Fatalf("VerifyProjectToken: %v", err)
+	}
+	if err := s.DeleteProject("demo"); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	if _, _, err := s.VerifyProjectToken("demo", token); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("cached token after project delete err = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestTableRouteCacheInvalidatedOnRecreate(t *testing.T) {
+	s, _ := openTestStore(t, 1<<20, 32)
+	p, _ := mustProject(t, s, "demo")
+	oldTable := mustTable(t, s, p, "recreated")
+	if _, err := s.PutKey(p, oldTable.Name, "k", ValueTypeString, strings.NewReader("old")); err != nil {
+		t.Fatalf("PutKey old table: %v", err)
+	}
+	if _, rc, err := s.GetKey(p, oldTable.Name, "k"); err != nil {
+		t.Fatalf("GetKey old table: %v", err)
+	} else {
+		_ = rc.Close()
+	}
+	if err := s.DeleteTable(p, oldTable.Name); err != nil {
+		t.Fatalf("DeleteTable: %v", err)
+	}
+	newTable := mustTable(t, s, p, oldTable.Name)
+	if newTable.ID == oldTable.ID {
+		t.Fatalf("recreated table id = %d, want different from %d", newTable.ID, oldTable.ID)
+	}
+	if _, err := s.PutKey(p, newTable.Name, "k", ValueTypeString, strings.NewReader("new")); err != nil {
+		t.Fatalf("PutKey new table: %v", err)
+	}
+	if _, rc, err := s.GetKey(p, newTable.Name, "k"); err != nil {
+		t.Fatalf("GetKey new table: %v", err)
+	} else if got := mustRead(t, rc); got != "new" {
+		t.Fatalf("value after table recreate = %q", got)
 	}
 }

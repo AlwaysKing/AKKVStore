@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -94,18 +95,22 @@ func (s *Store) queryProjectRecords(
 		return ProjectRecordQueryResult{}, err
 	}
 
-	s.writeMu.RLock()
-	defer s.writeMu.RUnlock()
-	if err := s.ensureProjectExists(p.ID); err != nil {
-		return ProjectRecordQueryResult{}, err
-	}
-	db, err := s.openProjectDB(p)
+	db, release, err := s.acquireProjectDB(p)
 	if err != nil {
 		return ProjectRecordQueryResult{}, err
 	}
-	defer db.Close()
+	defer release()
+	if query.IncludeValues {
+		s.blobLifecycleMu.RLock()
+		defer s.blobLifecycleMu.RUnlock()
+	}
+	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return ProjectRecordQueryResult{}, err
+	}
+	defer tx.Rollback()
 
-	tables, err := s.selectQueryTables(db, query.Tables)
+	tables, err := s.selectQueryTables(p, tx, query.Tables)
 	if err != nil {
 		return ProjectRecordQueryResult{}, err
 	}
@@ -114,7 +119,7 @@ func (s *Store) queryProjectRecords(
 	var total int64
 	for i, table := range tables {
 		q := fmt.Sprintf(`SELECT COUNT(*) FROM "%s"%s`, table.TableName, whereClause)
-		if err := db.QueryRow(q, args...).Scan(&counts[i]); err != nil {
+		if err := tx.QueryRow(q, args...).Scan(&counts[i]); err != nil {
 			return ProjectRecordQueryResult{}, err
 		}
 		total += counts[i]
@@ -143,7 +148,7 @@ func (s *Store) queryProjectRecords(
 		q := fmt.Sprintf(`SELECT %s FROM "%s"%s ORDER BY key ASC LIMIT ? OFFSET ?`,
 			selectColumns, table.TableName, whereClause)
 		queryArgs := append(append([]any{}, args...), take, remainingOffset)
-		rows, err := db.Query(q, queryArgs...)
+		rows, err := tx.Query(q, queryArgs...)
 		if err != nil {
 			return ProjectRecordQueryResult{}, err
 		}
@@ -163,20 +168,15 @@ func (s *Store) queryProjectRecords(
 		remainingOffset = 0
 		remainingLimit -= take
 	}
+	if err := tx.Commit(); err != nil {
+		return ProjectRecordQueryResult{}, err
+	}
 	return ProjectRecordQueryResult{Records: records, Total: total}, nil
 }
 
-func (s *Store) selectQueryTables(db *sql.DB, requested []string) ([]Table, error) {
-	all, err := s.listTablesLocked(db)
-	if err != nil {
-		return nil, err
-	}
-	byName := make(map[string]Table, len(all))
-	for _, table := range all {
-		byName[table.Name] = table
-	}
+func (s *Store) selectQueryTables(p Project, db sqlQueryRouter, requested []string) ([]Table, error) {
 	if len(requested) == 0 {
-		return all, nil
+		return s.listTablesLocked(db)
 	}
 	seen := make(map[string]struct{}, len(requested))
 	out := make([]Table, 0, len(requested))
@@ -188,9 +188,9 @@ func (s *Store) selectQueryTables(db *sql.DB, requested []string) ([]Table, erro
 		if _, ok := seen[name]; ok {
 			continue
 		}
-		table, ok := byName[name]
-		if !ok {
-			return nil, ErrTableNotFound
+		table, err := s.getTableRoute(db, p, name)
+		if err != nil {
+			return nil, err
 		}
 		seen[name] = struct{}{}
 		out = append(out, table)

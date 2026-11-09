@@ -196,6 +196,8 @@ func batchOperationName(operation store.BatchWriteOperation) string {
 
 func batchErrorInfo(err error) (int, string, string) {
 	switch {
+	case store.IsDatabaseBusy(err):
+		return 503, "database_busy", "数据库繁忙，请稍后重试"
 	case errors.Is(err, store.ErrPreconditionFailed):
 		var failed *store.PreconditionFailed
 		if errors.As(err, &failed) {

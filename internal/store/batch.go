@@ -57,16 +57,18 @@ func (s *Store) BatchWriteAtomic(
 		return nil, err
 	}
 
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	if err := s.ensureProjectExists(p.ID); err != nil {
-		return nil, err
-	}
-	db, err := s.openProjectDB(p)
+	db, release, err := s.acquireProjectDB(p)
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
+	defer release()
+	blobLocked := true
+	s.blobLifecycleMu.RLock()
+	defer func() {
+		if blobLocked {
+			s.blobLifecycleMu.RUnlock()
+		}
+	}()
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
@@ -77,6 +79,7 @@ func (s *Store) BatchWriteAtomic(
 	var createdBlobPaths []string
 	var createdTableDirs []string
 	var oldBlobs []oldBlobCandidate
+	tableLookup := make(map[string]Table)
 	committed := false
 	defer func() {
 		if committed {
@@ -97,9 +100,13 @@ func (s *Store) BatchWriteAtomic(
 			removeOld string
 		)
 		if operation.Delete {
-			table, err := getTableTx(tx, operation.TableName)
-			if err != nil {
-				return nil, batchFailure(i, operation, err)
+			table, ok := tableLookup[operation.TableName]
+			if !ok {
+				table, err = getTableTx(tx, operation.TableName)
+				if err != nil {
+					return nil, batchFailure(i, operation, err)
+				}
+				tableLookup[operation.TableName] = table
 			}
 			meta, removeOld, err = s.deleteKeyTx(
 				tx, p, table, operation.Key, operation.UpdatedAt, operation.Condition,
@@ -111,9 +118,15 @@ func (s *Store) BatchWriteAtomic(
 				oldBlobs = append(oldBlobs, oldBlobCandidate{table: table, hash: removeOld})
 			}
 		} else {
-			table, tableCreated, err := ensureTableTx(tx, operation.TableName, now, true)
-			if err != nil {
-				return nil, batchFailure(i, operation, err)
+			table, ok := tableLookup[operation.TableName]
+			tableCreated := false
+			if !ok {
+				var lookupErr error
+				table, tableCreated, lookupErr = ensureTableTx(tx, operation.TableName, now, true)
+				if lookupErr != nil {
+					return nil, batchFailure(i, operation, lookupErr)
+				}
+				tableLookup[operation.TableName] = table
 			}
 			state, err := loadRecordState(tx, table, operation.Key)
 			if err != nil {
@@ -177,6 +190,10 @@ func (s *Store) BatchWriteAtomic(
 		return nil, err
 	}
 	committed = true
+	if blobLocked {
+		s.blobLifecycleMu.RUnlock()
+		blobLocked = false
+	}
 	s.cleanupOldBatchBlobs(db, p, oldBlobs)
 	return results, nil
 }
@@ -237,21 +254,16 @@ func writeBlobFile(path string, value []byte) (bool, error) {
 	if _, err := file.Write(value); err != nil {
 		return false, err
 	}
-	if err := file.Sync(); err != nil {
-		return false, err
-	}
 	if err := file.Close(); err != nil {
 		return false, err
 	}
 	ok = true
-	if err := syncDir(filepath.Dir(path)); err != nil {
-		_ = os.Remove(path)
-		return false, err
-	}
 	return true, nil
 }
 
 func (s *Store) cleanupOldBatchBlobs(db *sql.DB, p Project, candidates []oldBlobCandidate) {
+	s.blobLifecycleMu.Lock()
+	defer s.blobLifecycleMu.Unlock()
 	seen := make(map[string]struct{}, len(candidates))
 	for _, candidate := range candidates {
 		if candidate.hash == "" || !blobFileRe.MatchString(candidate.hash) {

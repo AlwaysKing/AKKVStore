@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -330,7 +331,7 @@ func projectFromParams(raw json.RawMessage) (string, error) {
 		return "", errors.New("params 必须是对象，并包含 project")
 	}
 	var params map[string]json.RawMessage
-	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&params); err != nil {
@@ -351,7 +352,7 @@ func decodeParams(raw json.RawMessage, dst any) error {
 	if len(raw) == 0 || string(raw) == "null" {
 		return errors.New("params 必须是对象")
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
@@ -419,6 +420,9 @@ func rpcErrorForStore(err error) (int, string, any) {
 			"key":     batchFailure.Key,
 			"message": batchFailure.Error(),
 		}
+	}
+	if store.IsDatabaseBusy(err) {
+		return rpcInternalError, "数据库繁忙，请稍后重试", map[string]any{"retryable": true}
 	}
 	switch {
 	case errors.Is(err, store.ErrPreconditionFailed):

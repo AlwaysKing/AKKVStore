@@ -972,6 +972,11 @@ curl "$KV_URL/v1/download" \
 
 ## 设计边界
 
+- 性能优先：SQLite 使用 WAL 和 `synchronous=OFF`，不等待每次提交刷盘；断电或系统崩溃时可能丢失最近写入，极端情况下可能损坏数据库文件。
+- project.db 连接按 project 热持有，每个 project 最多 10 个连接；全局空闲缓存上限 32 个 project，连续 5 分钟无读写后自动关闭，活跃连接不会被强制驱逐。
+- project 内普通读写直接交给 SQLite，由数据库文件锁和 `BEGIN IMMEDIATE` 串行化写事务，不使用全局业务写锁。
+- project Token 鉴权结果最多缓存 30 秒；通过管理后台删除 Token 或 project 时立即失效。
+- 访问统计先累计在内存中，约每秒批量写入 system.db；进程异常退出时允许丢失尚未落库的统计。
 - `updatedAt` 由客户端维护，服务端不校验时钟准确性。
 - 服务端不处理业务冲突，只执行客户端提供的原子条件。
 - 不提供完整历史版本链。
