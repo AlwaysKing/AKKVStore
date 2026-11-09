@@ -18,7 +18,7 @@ type BatchWriteOperation struct {
 	TableName   string
 	Key         string
 	Delete      bool
-	ContentType string
+	ContentType ValueType
 	Value       []byte
 	UpdatedAt   int64
 	Condition   WriteCondition
@@ -127,8 +127,7 @@ func (s *Store) BatchWriteAtomic(
 				return nil, batchFailure(i, operation, preconditionFailed(operation.Key, state))
 			}
 
-			contentType, err := NormalizeContentType(operation.ContentType)
-			if err != nil {
+			if err := ValidateValueType(operation.ContentType); err != nil {
 				return nil, batchFailure(i, operation, err)
 			}
 			size := int64(len(operation.Value))
@@ -162,7 +161,7 @@ func (s *Store) BatchWriteAtomic(
 				blobHash = sql.NullString{String: hashHex, Valid: true}
 			}
 			meta, removeOld, err = s.upsertLocked(
-				tx, p, table, operation.Key, contentType, hashHex,
+				tx, p, table, operation.Key, operation.ContentType, hashHex,
 				inline, blobHash, size, now, operation.UpdatedAt, state,
 			)
 			if err != nil {
@@ -198,7 +197,7 @@ func ValidateBatchOperations(operations []BatchWriteOperation) error {
 			return batchFailure(i, operation, err)
 		}
 		if !operation.Delete {
-			if _, err := NormalizeContentType(operation.ContentType); err != nil {
+			if err := ValidateValueType(operation.ContentType); err != nil {
 				return batchFailure(i, operation, err)
 			}
 		}

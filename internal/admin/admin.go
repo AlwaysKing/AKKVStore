@@ -90,9 +90,10 @@ func New(st *store.Store, secret []byte, ttl time.Duration, cookieSecure bool, l
 			}
 			return time.UnixMilli(ts).Format("2006-01-02 15:04:05")
 		},
-		"humanSize":    humanSize,
-		"compactCount": compactCount,
-		"displayKey":   displayKey,
+		"humanSize":      humanSize,
+		"compactCount":   compactCount,
+		"displayKey":     displayKey,
+		"valueTypeLabel": valueTypeLabel,
 		"tokenMask": func(token string) string {
 			if token == "" {
 				return ""
@@ -155,7 +156,6 @@ func (a *Admin) Handler() http.Handler {
 	mux.HandleFunc("GET /projects/{name}/tables/{table}/key/content", a.requireAuth(a.getKeyContent))
 	mux.HandleFunc("GET /projects/{name}/tables/{table}/key", a.requireAuth(a.getKey))
 	mux.HandleFunc("POST /projects/{name}/tables/{table}/key", a.requireAuth(a.postPutKey))
-	mux.HandleFunc("POST /projects/{name}/tables/{table}/key/content-type", a.requireAuth(a.postUpdateContentType))
 	mux.HandleFunc("POST /projects/{name}/tables/{table}/key/rename", a.requireAuth(a.postRenameKey))
 	mux.HandleFunc("POST /projects/{name}/tables/{table}/keys/delete", a.requireAuth(a.postBulkDeleteKeys))
 	mux.HandleFunc("GET /projects/{name}/tables/{table}/download", a.requireAuth(a.getDownload))
@@ -240,7 +240,7 @@ type keyData struct {
 	ActiveTable string
 	Table       store.Table
 	Key         string
-	ContentType string
+	ContentType store.ValueType
 	Exists      bool
 	Size        int64
 	UpdatedAt   int64
@@ -1358,7 +1358,7 @@ func (a *Admin) getProjectSettings(w http.ResponseWriter, r *http.Request, sess 
 		Tables:      tables,
 		Tokens:      tokens,
 		ActiveTable: activeTable,
-		APIBasePath: "/v1/" + url.PathEscape(p.Name),
+		APIBasePath: "/v1/api",
 	}
 	data.Flash = a.takeFlash(w, r)
 	a.render(w, http.StatusOK, "settings", data)
@@ -1368,7 +1368,7 @@ func (a *Admin) keyPreview(p store.Project, tableName string, key store.KeyMeta)
 	if key.Size == 0 {
 		return "(空)", nil
 	}
-	if !isTextContentType(key.ContentType) {
+	if key.ContentType != store.ValueTypeString {
 		return "[二进制 " + humanSize(key.Size) + "]", nil
 	}
 	_, rc, err := a.store.GetKey(p, tableName, key.Key)
@@ -1489,12 +1489,12 @@ func (a *Admin) postDeleteProjectToken(w http.ResponseWriter, r *http.Request, s
 }
 
 type keyContentData struct {
-	Editable    bool   `json:"editable"`
-	ContentType string `json:"contentType"`
-	Size        int64  `json:"size"`
-	External    bool   `json:"external"`
-	FileName    string `json:"fileName,omitempty"`
-	Value       string `json:"value,omitempty"`
+	Editable    bool            `json:"editable"`
+	ContentType store.ValueType `json:"contentType"`
+	Size        int64           `json:"size"`
+	External    bool            `json:"external"`
+	FileName    string          `json:"fileName,omitempty"`
+	Value       string          `json:"value,omitempty"`
 }
 
 func (a *Admin) getKeyContent(w http.ResponseWriter, r *http.Request, _ auth.Session) {
@@ -1527,7 +1527,7 @@ func (a *Admin) getKeyContent(w http.ResponseWriter, r *http.Request, _ auth.Ses
 		External:    meta.External,
 		FileName:    path.Base(key),
 	}
-	if !isTextContentType(meta.ContentType) || meta.Size > previewLimit {
+	if meta.ContentType != store.ValueTypeString || meta.Size > previewLimit {
 		writeAdminJSON(w, http.StatusOK, result)
 		return
 	}
@@ -1603,7 +1603,7 @@ func (a *Admin) getKey(w http.ResponseWriter, r *http.Request, sess auth.Session
 		ActiveTable: table.Name,
 		Table:       table,
 		Key:         key,
-		ContentType: "application/json",
+		ContentType: store.ValueTypeString,
 	}
 	data.Flash = a.takeFlash(w, r)
 
@@ -1632,7 +1632,7 @@ func (a *Admin) getKey(w http.ResponseWriter, r *http.Request, sess auth.Session
 			data.ContentType = meta.ContentType
 			data.Size = meta.Size
 			data.UpdatedAt = meta.UpdatedAt
-			if isTextContentType(meta.ContentType) && meta.Size <= previewLimit {
+			if meta.ContentType == store.ValueTypeString && meta.Size <= previewLimit {
 				b, err := io.ReadAll(io.LimitReader(rc, previewLimit+1))
 				if err == nil && int64(len(b)) <= previewLimit && utf8.Valid(b) {
 					data.Value = string(b)
@@ -1722,11 +1722,10 @@ func (a *Admin) postPutKey(w http.ResponseWriter, r *http.Request, sess auth.Ses
 		redirectToKey("Key 已删除", "")
 		return
 	}
-	contentType := r.FormValue("content_type")
 	if createOnly {
-		_, err = a.store.PutKeyCreate(p, table.Name, key, contentType, strings.NewReader(r.FormValue("value")))
+		_, err = a.store.PutKeyCreate(p, table.Name, key, store.ValueTypeString, strings.NewReader(r.FormValue("value")))
 	} else {
-		_, err = a.store.PutKey(p, table.Name, key, contentType, strings.NewReader(r.FormValue("value")))
+		_, err = a.store.PutKey(p, table.Name, key, store.ValueTypeString, strings.NewReader(r.FormValue("value")))
 	}
 	if err != nil {
 		if inlineRequest {
@@ -1795,43 +1794,6 @@ func (a *Admin) postRenameKey(w http.ResponseWriter, r *http.Request, sess auth.
 	http.Redirect(w, r, "/admin/projects/"+url.PathEscape(name)+"/tables/"+url.PathEscape(table.Name), http.StatusSeeOther)
 }
 
-func (a *Admin) postUpdateContentType(w http.ResponseWriter, r *http.Request, sess auth.Session) {
-	name := r.PathValue("name")
-	p, err := a.store.GetProject(name)
-	if err != nil {
-		a.renderError(w, http.StatusNotFound, sess, "项目不存在")
-		return
-	}
-	table, err := a.store.GetTable(p, r.PathValue("table"))
-	if err != nil {
-		a.renderError(w, http.StatusNotFound, sess, "Table 不存在")
-		return
-	}
-	key := r.FormValue("key")
-	_, err = a.store.UpdateKeyContentType(p, table.Name, key, r.FormValue("content_type"), time.Now().UnixMilli())
-	if err != nil {
-		message := "更新 Content-Type 失败"
-		switch {
-		case errors.Is(err, store.ErrNotFound):
-			message = "Key 不存在"
-		case errors.Is(err, store.ErrInvalid):
-			message = strings.TrimPrefix(err.Error(), "invalid input: ")
-		default:
-			a.log.Error("update content type", "project", p.Name, "table", table.Name, "key", key, "err", err)
-		}
-		a.setFlash(w, auth.Flash{
-			ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
-			Error:     message,
-		})
-	} else {
-		a.setFlash(w, auth.Flash{
-			ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
-			Message:   "Content-Type 已更新",
-		})
-	}
-	http.Redirect(w, r, "/admin/projects/"+url.PathEscape(name)+"/tables/"+url.PathEscape(table.Name), http.StatusSeeOther)
-}
-
 func (a *Admin) postBulkDeleteKeys(w http.ResponseWriter, r *http.Request, sess auth.Session) {
 	name := r.PathValue("name")
 	p, err := a.store.GetProject(name)
@@ -1896,10 +1858,7 @@ func (a *Admin) saveMultipart(p store.Project, tableName string, r *http.Request
 		return fmt.Errorf("解析上传表单失败: %w", err)
 	}
 	fields := make(map[string]string)
-	var (
-		uploadedFile    string
-		fileContentType string
-	)
+	var uploadedFile string
 
 	for {
 		part, err := mr.NextPart()
@@ -1923,7 +1882,6 @@ func (a *Admin) saveMultipart(p store.Project, tableName string, r *http.Request
 			}
 			uploadedFile = tmp.Name()
 			defer os.Remove(uploadedFile)
-			fileContentType = part.Header.Get("Content-Type")
 			var src io.Reader = part
 			maxValueBytes := a.store.MaxValueBytes()
 			if maxValueBytes > 0 {
@@ -1971,19 +1929,15 @@ func (a *Admin) saveMultipart(p store.Project, tableName string, r *http.Request
 		if *key == "" {
 			return fmt.Errorf("缺少 Key")
 		}
-		contentType := fileContentType
-		if contentType == "" || contentType == "application/octet-stream" {
-			contentType = fields["content_type"]
-		}
 		f, err := os.Open(uploadedFile)
 		if err != nil {
 			return err
 		}
 		defer f.Close()
 		if createOnly {
-			_, err = a.store.PutKeyCreate(p, tableName, *key, contentType, f)
+			_, err = a.store.PutKeyCreate(p, tableName, *key, store.ValueTypeFile, f)
 		} else {
-			_, err = a.store.PutKey(p, tableName, *key, contentType, f)
+			_, err = a.store.PutKey(p, tableName, *key, store.ValueTypeFile, f)
 		}
 		return err
 	}
@@ -1999,9 +1953,9 @@ func (a *Admin) putFromFields(p store.Project, tableName, key string, fields map
 	}
 	var err error
 	if createOnly {
-		_, err = a.store.PutKeyCreate(p, tableName, key, fields["content_type"], strings.NewReader(fields["value"]))
+		_, err = a.store.PutKeyCreate(p, tableName, key, store.ValueTypeString, strings.NewReader(fields["value"]))
 	} else {
-		_, err = a.store.PutKey(p, tableName, key, fields["content_type"], strings.NewReader(fields["value"]))
+		_, err = a.store.PutKey(p, tableName, key, store.ValueTypeString, strings.NewReader(fields["value"]))
 	}
 	return err
 }
@@ -2062,7 +2016,7 @@ func (a *Admin) getDownload(w http.ResponseWriter, r *http.Request, sess auth.Se
 	if disposition == "" {
 		disposition = "attachment"
 	}
-	w.Header().Set("Content-Type", meta.ContentType)
+	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", disposition)
 	w.Header().Set("ETag", `"`+meta.ContentHash+`"`)
 	w.Header().Set("Cache-Control", "no-store")
@@ -2087,22 +2041,11 @@ func publicStoreError(err error) string {
 	}
 }
 
-func isTextContentType(ct string) bool {
-	mt, _, err := mime.ParseMediaType(ct)
-	if err != nil {
-		return false
+func valueTypeLabel(valueType store.ValueType) string {
+	if valueType == store.ValueTypeFile {
+		return "file"
 	}
-	if strings.HasPrefix(mt, "text/") {
-		return true
-	}
-	switch mt {
-	case "application/json", "application/ld+json", "application/xml", "application/xhtml+xml",
-		"application/javascript", "application/ecmascript", "application/x-ndjson",
-		"application/yaml", "application/x-yaml", "application/toml",
-		"application/x-www-form-urlencoded", "application/sql", "application/graphql":
-		return true
-	}
-	return false
+	return "string"
 }
 
 func humanSize(n int64) string {

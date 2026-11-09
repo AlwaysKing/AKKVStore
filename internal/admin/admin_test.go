@@ -157,13 +157,13 @@ func TestAdminTablePrefixPagination(t *testing.T) {
 		t.Fatalf("CreateTable: %v", err)
 	}
 	for i := 0; i < 55; i++ {
-		if _, err := st.PutKey(p, table.Name, fmt.Sprintf("group/key%02d", i), "text/plain",
+		if _, err := st.PutKey(p, table.Name, fmt.Sprintf("group/key%02d", i), store.ValueTypeString,
 			strings.NewReader("value")); err != nil {
 			t.Fatalf("put group key %d: %v", i, err)
 		}
 	}
 	for i := 0; i < 5; i++ {
-		if _, err := st.PutKey(p, table.Name, fmt.Sprintf("other/key%02d", i), "text/plain",
+		if _, err := st.PutKey(p, table.Name, fmt.Sprintf("other/key%02d", i), store.ValueTypeString,
 			strings.NewReader("value")); err != nil {
 			t.Fatalf("put other key %d: %v", i, err)
 		}
@@ -219,7 +219,6 @@ func TestInlineMultipartCreate(t *testing.T) {
 		_ = writer.WriteField("action", "save")
 		_ = writer.WriteField("key", "new-key")
 		_ = writer.WriteField("value", "new value")
-		_ = writer.WriteField("content_type", "text/plain")
 		_ = writer.Close()
 		req, _ := http.NewRequest(http.MethodPost,
 			ts.URL+"/admin/projects/inline/tables/main/key?return_to=table&create=1", &body)
@@ -241,7 +240,7 @@ func TestInlineMultipartCreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetKey after inline create: %v", err)
 	}
-	if meta.ContentType != "text/plain" || readAll(t, rc) != "new value" {
+	if meta.ContentType != store.ValueTypeString || readAll(t, rc) != "new value" {
 		t.Fatalf("inline created meta = %+v", meta)
 	}
 
@@ -256,7 +255,6 @@ func TestInlineMultipartCreate(t *testing.T) {
 	if _, err := filePart.Write([]byte("uploaded-content")); err != nil {
 		t.Fatalf("write upload: %v", err)
 	}
-	_ = writer.WriteField("content_type", "text/custom")
 	_ = writer.Close()
 	req, _ := http.NewRequest(http.MethodPost,
 		ts.URL+"/admin/projects/inline/tables/main/key?return_to=table&create=1", &uploadBody)
@@ -277,7 +275,7 @@ func TestInlineMultipartCreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetKey uploaded file: %v", err)
 	}
-	if meta.ContentType != "text/custom" || readAll(t, rc) != "uploaded-content" {
+	if meta.ContentType != store.ValueTypeFile || readAll(t, rc) != "uploaded-content" {
 		t.Fatalf("uploaded file meta = %+v", meta)
 	}
 
@@ -310,7 +308,6 @@ func TestAdminMultipartUploadLimit(t *testing.T) {
 	if _, err := filePart.Write(bytes.Repeat([]byte("x"), 100)); err != nil {
 		t.Fatalf("write upload: %v", err)
 	}
-	_ = writer.WriteField("content_type", "application/octet-stream")
 	_ = writer.Close()
 	req, _ := http.NewRequest(http.MethodPost,
 		ts.URL+"/admin/projects/limited/tables/main/key?return_to=table&create=1", &body)
@@ -347,7 +344,7 @@ func TestAdminBulkDeleteKeys(t *testing.T) {
 		t.Fatalf("CreateTable: %v", err)
 	}
 	for _, key := range []string{"a", "b", "c"} {
-		if _, err := st.PutKey(p, table.Name, key, "text/plain", strings.NewReader(key)); err != nil {
+		if _, err := st.PutKey(p, table.Name, key, store.ValueTypeString, strings.NewReader(key)); err != nil {
 			t.Fatalf("PutKey %s: %v", key, err)
 		}
 	}
@@ -389,10 +386,9 @@ func TestAdminKeyWhitespaceNormalization(t *testing.T) {
 	login(t, ts, client)
 
 	resp, err := client.PostForm(ts.URL+"/admin/projects/spaces/tables/main/key?return_to=table&create=1", url.Values{
-		"action":       {"save"},
-		"key":          {"  spaced-key  "},
-		"content_type": {"text/plain"},
-		"value":        {"value"},
+		"action": {"save"},
+		"key":    {"  spaced-key  "},
+		"value":  {"value"},
 	})
 	if err != nil {
 		t.Fatalf("create spaced key: %v", err)
@@ -405,7 +401,7 @@ func TestAdminKeyWhitespaceNormalization(t *testing.T) {
 		t.Fatalf("untrimmed key err = %v, want ErrNotFound", err)
 	}
 
-	if _, err := st.PutKey(p, table.Name, "asd ", "text/plain", strings.NewReader("existing")); err != nil {
+	if _, err := st.PutKey(p, table.Name, "asd ", store.ValueTypeString, strings.NewReader("existing")); err != nil {
 		t.Fatalf("create trailing-space key: %v", err)
 	}
 	resp, err = client.Get(ts.URL + "/admin/projects/spaces/tables/main")
@@ -1100,17 +1096,15 @@ func TestAdminEndToEnd(t *testing.T) {
 	if !strings.Contains(body, "table-action-row") {
 		t.Fatalf("new key table row missing: %s", body)
 	}
-	if !strings.Contains(body, "inline-key-rename-form") || !strings.Contains(body, "inline-value-edit-form") ||
-		!strings.Contains(body, "inline-content-type-edit-form") {
+	if !strings.Contains(body, "inline-key-rename-form") || !strings.Contains(body, "inline-value-edit-form") {
 		t.Fatalf("inline cell editing forms missing: %s", body)
 	}
 
 	// URL 编码表单保存文本
 	resp, err = client.PostForm(ts.URL+"/admin/projects/demo/tables/main/key?return_to=table&create=1", url.Values{
-		"action":       {"save"},
-		"key":          {"hello"},
-		"content_type": {"application/json"},
-		"value":        {`{"a":1}`},
+		"action": {"save"},
+		"key":    {"hello"},
+		"value":  {`{"a":1}`},
 	})
 	if err != nil {
 		t.Fatalf("save key: %v", err)
@@ -1135,7 +1129,6 @@ func TestAdminEndToEnd(t *testing.T) {
 		t.Fatalf("new key form is missing create-only mode: %s", body)
 	}
 	if !strings.Contains(body, `data-cell="key"`) || !strings.Contains(body, `data-cell="value"`) ||
-		!strings.Contains(body, `data-cell="content-type"`) ||
 		!strings.Contains(body, "data-edit-url") || !strings.Contains(body, "data-content-url") {
 		t.Fatalf("inline cell editing data missing: %s", body)
 	}
@@ -1164,10 +1157,9 @@ func TestAdminEndToEnd(t *testing.T) {
 	}
 
 	resp, err = client.PostForm(ts.URL+"/admin/projects/demo/tables/main/key?return_to=table&create=1", url.Values{
-		"action":       {"save"},
-		"key":          {"hello"},
-		"content_type": {"text/plain"},
-		"value":        {"duplicate"},
+		"action": {"save"},
+		"key":    {"hello"},
+		"value":  {"duplicate"},
 	})
 	if err != nil {
 		t.Fatalf("duplicate create: %v", err)
@@ -1177,10 +1169,9 @@ func TestAdminEndToEnd(t *testing.T) {
 		t.Fatalf("duplicate key error missing: %s", body)
 	}
 	duplicateForm := url.Values{
-		"action":       {"save"},
-		"key":          {"hello"},
-		"content_type": {"text/plain"},
-		"value":        {"duplicate-inline"},
+		"action": {"save"},
+		"key":    {"hello"},
+		"value":  {"duplicate-inline"},
 	}
 	req, _ = http.NewRequest(http.MethodPost,
 		ts.URL+"/admin/projects/demo/tables/main/key?return_to=table&create=1",
@@ -1206,10 +1197,9 @@ func TestAdminEndToEnd(t *testing.T) {
 		t.Fatalf("inline duplicate error = %q", inlineError.Error)
 	}
 	resp, err = client.PostForm(ts.URL+"/admin/projects/demo/tables/main/key?return_to=table&create=1", url.Values{
-		"action":       {"save"},
-		"key":          {"occupied"},
-		"content_type": {"text/plain"},
-		"value":        {"occupied-value"},
+		"action": {"save"},
+		"key":    {"occupied"},
+		"value":  {"occupied-value"},
 	})
 	if err != nil {
 		t.Fatalf("create occupied key: %v", err)
@@ -1270,33 +1260,18 @@ func TestAdminEndToEnd(t *testing.T) {
 		t.Fatalf("get inline key content: %v", err)
 	}
 	var inlineContent struct {
-		Editable    bool   `json:"editable"`
-		ContentType string `json:"contentType"`
-		Value       string `json:"value"`
+		Editable    bool            `json:"editable"`
+		ContentType store.ValueType `json:"contentType"`
+		Value       string          `json:"value"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&inlineContent); err != nil {
 		resp.Body.Close()
 		t.Fatalf("decode inline key content: %v", err)
 	}
 	resp.Body.Close()
-	if !inlineContent.Editable || inlineContent.ContentType != "application/json" || inlineContent.Value != `{"a":1}` {
+	if !inlineContent.Editable || inlineContent.ContentType != store.ValueTypeString || inlineContent.Value != `{"a":1}` {
 		t.Fatalf("inline content = %+v", inlineContent)
 	}
-	resp, err = client.PostForm(ts.URL+"/admin/projects/demo/tables/main/key/content-type", url.Values{
-		"key":          {"hello"},
-		"content_type": {"text/plain; charset=utf-8"},
-	})
-	if err != nil {
-		t.Fatalf("update content type: %v", err)
-	}
-	body = bodyOf(t, resp)
-	if !strings.Contains(body, "Content-Type 已更新") {
-		t.Fatalf("content type update flash missing: %s", body)
-	}
-	if !strings.Contains(body, "flash-stack") {
-		t.Fatalf("content type update flash is not rendered as a floating stack: %s", body)
-	}
-
 	resp, err = client.PostForm(ts.URL+"/admin/projects/demo/tables/main/key/rename", url.Values{
 		"old_key": {"hello"},
 		"new_key": {"hello-renamed"},
@@ -1329,8 +1304,8 @@ func TestAdminEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetKey hello: %v", err)
 	}
-	if meta.ContentType != "text/plain; charset=utf-8" {
-		t.Fatalf("content type = %q", meta.ContentType)
+	if meta.ContentType != store.ValueTypeString {
+		t.Fatalf("content type = %v", meta.ContentType)
 	}
 	if got := readAll(t, rc); got != `{"a":1}` {
 		t.Fatalf("value = %q", got)
@@ -1370,7 +1345,6 @@ func TestAdminEndToEnd(t *testing.T) {
 	mw := multipart.NewWriter(&buf)
 	_ = mw.WriteField("action", "save")
 	_ = mw.WriteField("key", "bin")
-	_ = mw.WriteField("content_type", "application/octet-stream")
 	fw, err := mw.CreateFormFile("file", "data.bin")
 	if err != nil {
 		t.Fatalf("CreateFormFile: %v", err)
@@ -1490,7 +1464,7 @@ func TestAdminEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(body, "Project API 地址") ||
 		!strings.Contains(body, `id="project-api-url"`) ||
-		!strings.Contains(body, `data-api-path="/v1/demo"`) ||
+		!strings.Contains(body, `data-api-path="/v1/api"`) ||
 		!strings.Contains(body, `data-copy="project-api-url"`) {
 		t.Fatalf("project API address control missing: %s", body)
 	}

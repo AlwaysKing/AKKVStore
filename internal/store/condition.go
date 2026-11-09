@@ -26,7 +26,7 @@ type recordState struct {
 	Deleted     bool
 	Value       []byte
 	BlobHash    string
-	ContentType string
+	ContentType ValueType
 	ContentHash string
 	Size        int64
 	CreatedAt   int64
@@ -67,7 +67,7 @@ func normalizeCondition(term Condition) (normalizedCondition, error) {
 		if _, ok := term.Value.(bool); !ok {
 			return normalizedCondition{}, fmt.Errorf("字段 %s 的值必须是布尔值", field)
 		}
-	case "updatedAt", "createdAt", "size":
+	case "updatedAt", "size":
 		if !isOrderedConditionOp(op) {
 			return normalizedCondition{}, fmt.Errorf("字段 %s 不支持操作符 %s", field, term.Op)
 		}
@@ -76,13 +76,15 @@ func normalizeCondition(term Condition) (normalizedCondition, error) {
 			return normalizedCondition{}, fmt.Errorf("字段 %s 的值必须是整数", field)
 		}
 		term.Value = value
-	case "contentType", "contentHash":
-		if !isStringConditionOp(op) {
-			return normalizedCondition{}, fmt.Errorf("字段 %s 不支持操作符 %s", field, term.Op)
+	case "contentType":
+		if op != "eq" && op != "ne" {
+			return normalizedCondition{}, fmt.Errorf("字段 %s 只支持 eq、ne", field)
 		}
-		if _, ok := term.Value.(string); !ok {
-			return normalizedCondition{}, fmt.Errorf("字段 %s 的值必须是字符串", field)
+		value, err := conditionInt64(term.Value)
+		if err != nil || (value != int64(ValueTypeString) && value != int64(ValueTypeFile)) {
+			return normalizedCondition{}, fmt.Errorf("字段 %s 的值必须是 0 或 1", field)
 		}
+		term.Value = ValueType(value)
 	case "value":
 		if !isValueConditionOp(op) {
 			return normalizedCondition{}, fmt.Errorf("字段 %s 不支持操作符 %s", field, term.Op)
@@ -131,6 +133,8 @@ func conditionInt64(value any) (int64, error) {
 		return int64(v), nil
 	case int64:
 		return v, nil
+	case ValueType:
+		return int64(v), nil
 	case uint:
 		if uint64(v) > uint64(^uint64(0)>>1) {
 			return 0, strconv.ErrRange
@@ -187,14 +191,10 @@ func (s *Store) matchConditionTerm(
 		return compareBool(state.Deleted, condition.value.(bool), condition.op), nil
 	case "updatedAt":
 		return compareInt64(state.UpdatedAt, condition.value.(int64), condition.op), nil
-	case "createdAt":
-		return compareInt64(state.CreatedAt, condition.value.(int64), condition.op), nil
 	case "size":
 		return compareInt64(state.Size, condition.value.(int64), condition.op), nil
 	case "contentType":
-		return compareString(state.ContentType, condition.value.(string), condition.op), nil
-	case "contentHash":
-		return compareString(state.ContentHash, condition.value.(string), condition.op), nil
+		return compareInt64(int64(state.ContentType), int64(condition.value.(ValueType)), condition.op), nil
 	case "value":
 		if !state.Exists || state.Deleted {
 			return compareBytes(nil, []byte(condition.value.(string)), condition.op)

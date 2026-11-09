@@ -16,12 +16,12 @@ import (
 )
 
 // PutKey 以流式方式写入 value，完整覆盖同名 key。
-func (s *Store) PutKey(p Project, table, key, contentType string, r io.Reader) (KeyMeta, error) {
+func (s *Store) PutKey(p Project, table, key string, contentType ValueType, r io.Reader) (KeyMeta, error) {
 	return s.putKey(p, table, key, contentType, r, time.Now().UnixMilli(), WriteCondition{}, false)
 }
 
 // PutKeyCreate 只在 key 不存在或已删除时创建，不会覆盖当前有效记录。
-func (s *Store) PutKeyCreate(p Project, table, key, contentType string, r io.Reader) (KeyMeta, error) {
+func (s *Store) PutKeyCreate(p Project, table, key string, contentType ValueType, r io.Reader) (KeyMeta, error) {
 	return s.putKey(p, table, key, contentType, r, time.Now().UnixMilli(), WriteCondition{}, true)
 }
 
@@ -29,7 +29,8 @@ func (s *Store) PutKeyCreate(p Project, table, key, contentType string, r io.Rea
 // table 不存在时，首次 PUT 会在同一事务中自动创建。
 func (s *Store) PutKeyConditional(
 	p Project,
-	tableName, key, contentType string,
+	tableName, key string,
+	contentType ValueType,
 	r io.Reader,
 	updatedAt int64,
 	condition WriteCondition,
@@ -39,7 +40,8 @@ func (s *Store) PutKeyConditional(
 
 func (s *Store) putKey(
 	p Project,
-	tableName, key, contentType string,
+	tableName, key string,
+	contentType ValueType,
 	r io.Reader,
 	updatedAt int64,
 	condition WriteCondition,
@@ -51,8 +53,7 @@ func (s *Store) putKey(
 	if err := ValidateKey(key); err != nil {
 		return KeyMeta{}, err
 	}
-	ct, err := NormalizeContentType(contentType)
-	if err != nil {
+	if err := ValidateValueType(contentType); err != nil {
 		return KeyMeta{}, err
 	}
 	if updatedAt <= 0 {
@@ -164,7 +165,7 @@ func (s *Store) putKey(
 		blobHash = sql.NullString{String: hashHex, Valid: true}
 	}
 
-	meta, removeOld, err := s.upsertLocked(tx, p, table, key, ct, hashHex, value, blobHash, size, now, updatedAt, state)
+	meta, removeOld, err := s.upsertLocked(tx, p, table, key, contentType, hashHex, value, blobHash, size, now, updatedAt, state)
 	if err != nil {
 		if createdBlob {
 			_ = os.Remove(filepath.Join(s.tableBlobDir(p, table), hashHex))
@@ -238,7 +239,9 @@ func (s *Store) upsertLocked(
 	tx *sql.Tx,
 	p Project,
 	table Table,
-	key, contentType, contentHash string,
+	key string,
+	contentType ValueType,
+	contentHash string,
 	value []byte,
 	blobHash sql.NullString,
 	size, serverNow, updatedAt int64,
@@ -334,14 +337,14 @@ func loadRecordState(tx *sql.Tx, table Table, key string) (recordState, error) {
 
 func preconditionFailed(key string, state recordState) error {
 	return &PreconditionFailed{
-		Key:           key,
-		Exists:        state.Exists,
-		Deleted:       state.Deleted,
-		UpdatedAt:     state.UpdatedAt,
-		CreatedAt:     state.CreatedAt,
-		ContentType:   state.ContentType,
-		ContentHash:   state.ContentHash,
-		ContentLength: state.Size,
+		Key:         key,
+		Exists:      state.Exists,
+		Deleted:     state.Deleted,
+		UpdatedAt:   state.UpdatedAt,
+		CreatedAt:   state.CreatedAt,
+		ContentType: state.ContentType,
+		ContentHash: state.ContentHash,
+		Size:        state.Size,
 	}
 }
 
@@ -388,7 +391,7 @@ func (s *Store) GetKey(p Project, tableName, key string) (KeyMeta, ReadSeekClose
 	var (
 		value       []byte
 		blobHash    sql.NullString
-		contentType string
+		contentType ValueType
 		size        int64
 		createdAt   int64
 		updatedAt   int64
@@ -486,7 +489,7 @@ func (s *Store) RenameKey(p Project, tableName, oldKey, newKey string) (KeyMeta,
 
 	var (
 		blobHash    sql.NullString
-		contentType string
+		contentType ValueType
 		size        int64
 		createdAt   int64
 		contentHash string
@@ -526,7 +529,7 @@ func (s *Store) RenameKey(p Project, tableName, oldKey, newKey string) (KeyMeta,
 		value = ?, blob_hash = NULL, content_hash = '', content_type = ?, size = 0,
 		updated_at = ?, deleted = 1
 		WHERE key = ?`, table.TableName),
-		[]byte{}, "application/octet-stream", updatedAt, oldKey); err != nil {
+		[]byte{}, contentType, updatedAt, oldKey); err != nil {
 		return KeyMeta{}, err
 	}
 
@@ -574,10 +577,11 @@ func (s *Store) RenameKey(p Project, tableName, oldKey, newKey string) (KeyMeta,
 	}, nil
 }
 
-// UpdateKeyContentType 只更新 key 的 Content-Type，不改变 value、存储位置或 content hash。
-func (s *Store) UpdateKeyContentType(
+// UpdateKeyValueType 只更新 key 的类型，不改变 value、存储位置或 content hash。
+func (s *Store) UpdateKeyValueType(
 	p Project,
-	tableName, key, contentType string,
+	tableName, key string,
+	contentType ValueType,
 	updatedAt int64,
 ) (KeyMeta, error) {
 	if !ValidateTableName(tableName) {
@@ -586,8 +590,7 @@ func (s *Store) UpdateKeyContentType(
 	if err := ValidateKey(key); err != nil {
 		return KeyMeta{}, err
 	}
-	contentType, err := NormalizeContentType(contentType)
-	if err != nil {
+	if err := ValidateValueType(contentType); err != nil {
 		return KeyMeta{}, err
 	}
 	if updatedAt <= 0 {
@@ -744,7 +747,7 @@ func (s *Store) deleteKeyTx(
 			size = 0,
 			updated_at = excluded.updated_at,
 			deleted = 1`, table.TableName),
-		key, []byte{}, "application/octet-stream", createdAt, updatedAt); err != nil {
+		key, []byte{}, state.ContentType, createdAt, updatedAt); err != nil {
 		return KeyMeta{}, "", err
 	}
 
@@ -760,7 +763,7 @@ func (s *Store) deleteKeyTx(
 	}
 	return KeyMeta{
 		Key:         key,
-		ContentType: "application/octet-stream",
+		ContentType: state.ContentType,
 		CreatedAt:   createdAt,
 		UpdatedAt:   updatedAt,
 		Deleted:     true,
@@ -859,7 +862,7 @@ func (s *Store) QueryRecords(p Project, tableName string, query RecordQuery) (Re
 			return RecordQueryResult{}, err
 		}
 		record.External = blobHash.Valid
-		if query.IncludeValues && !record.Deleted {
+		if query.IncludeValues && !record.Deleted && record.ContentType != ValueTypeFile {
 			if record.Size > maxQueryValueBytes-valueBytes {
 				return RecordQueryResult{}, fmt.Errorf(
 					"%w: includeValues 单页总内容不能超过 %d 字节",

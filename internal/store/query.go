@@ -239,8 +239,6 @@ func normalizeQueryTerm(term QueryCondition) (normalizedQueryCondition, error) {
 			return normalizedQueryCondition{}, fmt.Errorf("key 条件不能超过 %d 字节", maxKeyBytes)
 		}
 		return normalizedQueryCondition{column: "key", op: op, value: value}, nil
-	case "createdAt":
-		return normalizeQueryIntCondition("created_at", term, op)
 	case "updatedAt":
 		return normalizeQueryIntCondition("updated_at", term, op)
 	case "size":
@@ -258,9 +256,14 @@ func normalizeQueryTerm(term QueryCondition) (normalizedQueryCondition, error) {
 		}
 		return normalizedQueryCondition{column: "deleted", op: op, value: int64(0)}, nil
 	case "contentType":
-		return normalizeQueryStringCondition("content_type", term, op)
-	case "contentHash":
-		return normalizeQueryStringCondition("content_hash", term, op)
+		if op != "eq" && op != "ne" {
+			return normalizedQueryCondition{}, fmt.Errorf("字段 %s 只支持 eq、ne", term.Field)
+		}
+		value, err := conditionInt64(term.Value)
+		if err != nil || (value != int64(ValueTypeString) && value != int64(ValueTypeFile)) {
+			return normalizedQueryCondition{}, fmt.Errorf("字段 %s 的值必须是 0 或 1", term.Field)
+		}
+		return normalizedQueryCondition{column: "content_type", op: op, value: value}, nil
 	default:
 		return normalizedQueryCondition{}, fmt.Errorf("不支持的查询字段 %q", term.Field)
 	}
@@ -277,21 +280,6 @@ func normalizeQueryIntCondition(
 	value, err := conditionInt64(term.Value)
 	if err != nil {
 		return normalizedQueryCondition{}, fmt.Errorf("字段 %s 的值必须是整数", term.Field)
-	}
-	return normalizedQueryCondition{column: column, op: op, value: value}, nil
-}
-
-func normalizeQueryStringCondition(
-	column string,
-	term QueryCondition,
-	op string,
-) (normalizedQueryCondition, error) {
-	if !isStringConditionOp(op) {
-		return normalizedQueryCondition{}, fmt.Errorf("字段 %s 不支持操作符 %s", term.Field, term.Op)
-	}
-	value, ok := term.Value.(string)
-	if !ok {
-		return normalizedQueryCondition{}, fmt.Errorf("字段 %s 的值必须是字符串", term.Field)
 	}
 	return normalizedQueryCondition{column: column, op: op, value: value}, nil
 }
@@ -346,7 +334,7 @@ func (s *Store) scanAdvancedRecord(
 		return Record{}, err
 	}
 	record.External = blobHash.Valid
-	if !includeValues || record.Deleted {
+	if !includeValues || record.Deleted || record.ContentType == ValueTypeFile {
 		return record, nil
 	}
 	if record.Size > maxQueryValueBytes-*valueBytes {

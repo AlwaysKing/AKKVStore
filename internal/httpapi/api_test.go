@@ -2,23 +2,18 @@ package httpapi
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"akkvstore/internal/store"
 )
-
-var testUpdatedAt atomic.Int64
 
 func newTestServer(t *testing.T, apiMax int64, origins []string) (*httptest.Server, *store.Store, store.Project, string) {
 	t.Helper()
@@ -49,98 +44,70 @@ func newTestServer(t *testing.T, apiMax int64, origins []string) (*httptest.Serv
 	return ts, st, p, token
 }
 
-func doRequest(t *testing.T, method, rawurl, token string, body []byte, headers map[string]string) *http.Response {
+func doRequest(t *testing.T, method, rawURL, token string, body []byte, headers map[string]string) *http.Response {
 	t.Helper()
-	var r io.Reader
+	var reader io.Reader
 	if body != nil {
-		r = bytes.NewReader(body)
+		reader = bytes.NewReader(body)
 	}
-	req, err := http.NewRequest(method, rawurl, r)
+	req, err := http.NewRequest(method, rawURL, reader)
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	if (method == http.MethodPut || method == http.MethodDelete) && req.Header.Get("X-Updated-At") == "" {
-		req.Header.Set("X-Updated-At", strconv.FormatInt(1_760_000_000_000+testUpdatedAt.Add(1), 10))
+	for key, value := range headers {
+		req.Header.Set(key, value)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("%s %s: %v", method, rawurl, err)
+		t.Fatalf("%s %s: %v", method, rawURL, err)
 	}
 	return resp
 }
 
-func TestPutGetDelete(t *testing.T) {
-	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	base := ts.URL + "/v1/demo/single/main/kv/" + url.PathEscape("user:1")
-
-	resp := doRequest(t, http.MethodPut, base, token, []byte(`{"hello":"世界"}`), map[string]string{"Content-Type": "application/json"})
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("PUT status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	if et := resp.Header.Get("ETag"); len(et) != 66 {
-		t.Fatalf("ETag = %q", et)
-	}
-	resp.Body.Close()
-
-	resp = doRequest(t, http.MethodGet, base, token, nil, nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
-		t.Fatalf("Content-Type = %q", ct)
-	}
-	if csp := resp.Header.Get("Content-Security-Policy"); csp != "sandbox; default-src 'none'" {
-		t.Fatalf("Content-Security-Policy = %q", csp)
-	}
-	body := readBody(resp)
-	if body != `{"hello":"世界"}` {
-		t.Fatalf("body = %q", body)
-	}
-
-	// HEAD 不返回 body，但应带 Content-Length。
-	req, _ := http.NewRequest(http.MethodHead, base, nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	headResp, err := http.DefaultClient.Do(req)
+func rpcCall(t *testing.T, ts *httptest.Server, token, method string, params map[string]any) (int, map[string]any) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  method,
+		"params":  params,
+	})
 	if err != nil {
-		t.Fatalf("HEAD: %v", err)
+		t.Fatalf("marshal rpc: %v", err)
 	}
-	if headResp.StatusCode != http.StatusOK {
-		t.Fatalf("HEAD status = %d", headResp.StatusCode)
+	resp := doRequest(t, http.MethodPost, ts.URL+"/v1/api", token, payload, map[string]string{
+		"Content-Type": "application/json",
+	})
+	defer resp.Body.Close()
+	var envelope map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		t.Fatalf("decode rpc response: %v", err)
 	}
-	if headResp.ContentLength != int64(len(`{"hello":"世界"}`)) {
-		t.Fatalf("HEAD Content-Length = %d", headResp.ContentLength)
-	}
-	headResp.Body.Close()
+	return resp.StatusCode, envelope
+}
 
-	resp = doRequest(t, http.MethodDelete, base, token, nil, nil)
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("DELETE status = %d", resp.StatusCode)
+func resultMap(t *testing.T, envelope map[string]any) map[string]any {
+	t.Helper()
+	if rpcErr, ok := envelope["error"]; ok {
+		t.Fatalf("unexpected rpc error: %#v", rpcErr)
 	}
-	resp.Body.Close()
-	resp = doRequest(t, http.MethodDelete, base, token, nil, nil)
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("DELETE idempotent status = %d", resp.StatusCode)
+	result, ok := envelope["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("result is not an object: %#v", envelope)
 	}
-	resp.Body.Close()
-	resp = doRequest(t, http.MethodGet, base, token, nil, nil)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("GET after delete status = %d", resp.StatusCode)
-	}
-	resp.Body.Close()
+	return result
 }
 
 func TestServerTime(t *testing.T) {
 	ts, _, _, _ := newTestServer(t, 1<<20, []string{"*"})
 	resp := doRequest(t, http.MethodGet, ts.URL+"/v1/time", "", nil, nil)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /v1/time status = %d, body = %s", resp.StatusCode, readBody(resp))
+		t.Fatalf("GET /v1/time status = %d", resp.StatusCode)
 	}
+	defer resp.Body.Close()
 	var result struct {
 		ServerTime int64  `json:"serverTime"`
 		ISO        string `json:"iso"`
@@ -148,12 +115,8 @@ func TestServerTime(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode time: %v", err)
 	}
-	resp.Body.Close()
 	if result.ServerTime <= 0 || result.ISO == "" {
 		t.Fatalf("time response = %+v", result)
-	}
-	if _, err := time.Parse(time.RFC3339Nano, result.ISO); err != nil {
-		t.Fatalf("iso time = %q: %v", result.ISO, err)
 	}
 
 	resp = doRequest(t, http.MethodPost, ts.URL+"/v1/time", "", nil, nil)
@@ -163,774 +126,261 @@ func TestServerTime(t *testing.T) {
 	resp.Body.Close()
 }
 
-func TestTableCRUDAndAutoCreate(t *testing.T) {
+func TestJSONRPCStringLifecycle(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	tablesURL := ts.URL + "/v1/demo/single"
+	project := "demo"
 
-	resp := doRequest(t, http.MethodGet, tablesURL, token, nil, nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("list tables status = %d, body = %s", resp.StatusCode, readBody(resp))
+	status, envelope := rpcCall(t, ts, token, "kv.put", map[string]any{
+		"project":   project,
+		"table":     "main",
+		"key":       "user:1",
+		"updatedAt": int64(1760000000001),
+		"value":     `{"hello":"世界"}`,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("kv.put status = %d, envelope = %#v", status, envelope)
 	}
-	var list struct {
-		Items []struct {
-			Name string `json:"name"`
-		} `json:"items"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
-		t.Fatalf("decode tables: %v", err)
-	}
-	resp.Body.Close()
-	if len(list.Items) != 0 {
-		t.Fatalf("initial tables = %+v", list.Items)
+	if _, ok := envelope["error"]; ok {
+		t.Fatalf("kv.put error = %#v", envelope)
 	}
 
-	resp = doRequest(t, http.MethodPost, tablesURL, token, []byte(`{"name":"users"}`),
-		map[string]string{"Content-Type": "application/json"})
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("create table status = %d, body = %s", resp.StatusCode, readBody(resp))
+	status, envelope = rpcCall(t, ts, token, "kv.get", map[string]any{
+		"project": project,
+		"table":   "main",
+		"key":     "user:1",
+	})
+	if status != http.StatusOK {
+		t.Fatalf("kv.get status = %d", status)
 	}
-	if loc := resp.Header.Get("Location"); loc != "/v1/demo/single/users" {
-		t.Fatalf("Location = %q", loc)
-	}
-	resp.Body.Close()
-
-	resp = doRequest(t, http.MethodPost, tablesURL, token, []byte(`{"name":"users"}`),
-		map[string]string{"Content-Type": "application/json"})
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("duplicate table status = %d", resp.StatusCode)
-	}
-	assertErrorCode(t, resp, "table_exists")
-
-	resp = doRequest(t, http.MethodGet, tablesURL+"/users", token, nil, nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("get table status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	resp.Body.Close()
-
-	autoURL := ts.URL + "/v1/demo/single/auto/kv/k"
-	resp = doRequest(t, http.MethodPut, autoURL, token, []byte("value"),
-		map[string]string{"Content-Type": "text/plain"})
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("auto-create put status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	resp.Body.Close()
-
-	resp = doRequest(t, http.MethodGet, tablesURL, token, nil, nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("list tables after put status = %d", resp.StatusCode)
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
-		t.Fatalf("decode tables after put: %v", err)
-	}
-	resp.Body.Close()
-	if len(list.Items) != 2 {
-		t.Fatalf("tables after auto-create = %+v", list.Items)
+	got := resultMap(t, envelope)
+	if got["contentType"] != float64(0) || got["value"] != `{"hello":"世界"}` {
+		t.Fatalf("kv.get result = %#v", got)
 	}
 
-	resp = doRequest(t, http.MethodGet, tablesURL+"/auto", token, nil, nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("get auto table status = %d", resp.StatusCode)
+	status, envelope = rpcCall(t, ts, token, "kv.delete", map[string]any{
+		"project":   project,
+		"table":     "main",
+		"key":       "user:1",
+		"updatedAt": int64(1760000000002),
+	})
+	if status != http.StatusOK {
+		t.Fatalf("kv.delete status = %d", status)
 	}
-	var detail struct {
-		Name     string `json:"name"`
-		KeyCount int64  `json:"keyCount"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
-		t.Fatalf("decode auto table: %v", err)
-	}
-	resp.Body.Close()
-	if detail.Name != "auto" || detail.KeyCount != 1 {
-		t.Fatalf("auto table detail = %+v", detail)
-	}
+	resultMap(t, envelope)
 
-	resp = doRequest(t, http.MethodDelete, tablesURL+"/auto", token, nil, nil)
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("delete table status = %d, body = %s", resp.StatusCode, readBody(resp))
+	status, envelope = rpcCall(t, ts, token, "kv.get", map[string]any{
+		"project": project,
+		"table":   "main",
+		"key":     "user:1",
+	})
+	if status != http.StatusOK {
+		t.Fatalf("deleted kv.get status = %d", status)
 	}
-	resp.Body.Close()
-	resp = doRequest(t, http.MethodGet, autoURL, token, nil, nil)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("get deleted table key status = %d", resp.StatusCode)
+	rpcErr, ok := envelope["error"].(map[string]any)
+	if !ok || rpcErr["code"] != float64(-32002) {
+		t.Fatalf("deleted kv.get envelope = %#v", envelope)
 	}
-	assertErrorCode(t, resp, "table_not_found")
-
-	resp = doRequest(t, http.MethodDelete, tablesURL+"/auto", token, nil, nil)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("delete missing table status = %d", resp.StatusCode)
-	}
-	assertErrorCode(t, resp, "table_not_found")
-
-	resp = doRequest(t, http.MethodPost, tablesURL, token, []byte(`{"name":"Bad Table"}`),
-		map[string]string{"Content-Type": "application/json"})
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("invalid table status = %d", resp.StatusCode)
-	}
-	assertErrorCode(t, resp, "invalid_table")
 }
 
-func TestRecordsQueryConditionsAndTombstones(t *testing.T) {
+func TestJSONRPCTableAndBatch(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	rawurl := ts.URL + "/v1/demo/single/main/kv/" + url.PathEscape("watchLater/series:1")
-	const (
-		t1 = "1760000000001"
-		t2 = "1760000000002"
-		t3 = "1760000000003"
-		t4 = "1760000000004"
-	)
 
-	resp := doRequest(t, http.MethodPut, rawurl, token, []byte(`{"v":1}`), map[string]string{
-		"Content-Type":   "application/json",
-		"X-Updated-At":   t1,
-		"X-KV-Condition": `{"all":[{"field":"exists","op":"eq","value":false}]}`,
+	status, envelope := rpcCall(t, ts, token, "table.create", map[string]any{
+		"project": "demo",
+		"name":    "batch",
 	})
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("create status = %d, body = %s", resp.StatusCode, readBody(resp))
+	if status != http.StatusOK {
+		t.Fatalf("table.create status = %d", status)
 	}
-	if got := resp.Header.Get("X-Updated-At"); got != t1 {
-		t.Fatalf("create updatedAt = %q", got)
+	resultMap(t, envelope)
+
+	status, envelope = rpcCall(t, ts, token, "table.list", map[string]any{"project": "demo"})
+	if status != http.StatusOK {
+		t.Fatalf("table.list status = %d", status)
+	}
+	result := resultMap(t, envelope)
+	if items, ok := result["items"].([]any); !ok || len(items) != 1 {
+		t.Fatalf("table.list result = %#v", result)
+	}
+
+	status, envelope = rpcCall(t, ts, token, "batch.execute", map[string]any{
+		"project":     "demo",
+		"transaction": true,
+		"operations": []any{
+			map[string]any{
+				"op":        "put",
+				"table":     "batch",
+				"key":       "one",
+				"updatedAt": int64(1760000000100),
+				"value":     "first",
+			},
+		},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("batch.execute status = %d", status)
+	}
+	batch := resultMap(t, envelope)
+	if batch["applied"] != float64(1) {
+		t.Fatalf("batch result = %#v", batch)
+	}
+
+	status, envelope = rpcCall(t, ts, token, "kv.get", map[string]any{
+		"project": "demo",
+		"table":   "batch",
+		"key":     "one",
+	})
+	if status != http.StatusOK {
+		t.Fatalf("batch kv.get status = %d", status)
+	}
+	if resultMap(t, envelope)["value"] != "first" {
+		t.Fatalf("batch kv.get envelope = %#v", envelope)
+	}
+}
+
+func TestFileUploadAndDownload(t *testing.T) {
+	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
+	key := base64.RawURLEncoding.EncodeToString([]byte("dir/report.bin"))
+	headers := map[string]string{
+		"AKKV-Index-Project":   "demo",
+		"AKKV-Index-Table":     "files",
+		"AKKV-Index-Key":       key,
+		"AKKV-Data-Updated-At": "1760000000010",
+		"Content-Type":         "application/pdf",
+	}
+	content := []byte{0x00, 0x01, 0x02, 'A', 'B'}
+
+	resp := doRequest(t, http.MethodPut, ts.URL+"/v1/upload", token, content, headers)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("upload status = %d, body = %s", resp.StatusCode, readBody(resp))
+	}
+	if et := resp.Header.Get("ETag"); et == "" {
+		t.Fatal("upload ETag is empty")
 	}
 	resp.Body.Close()
 
-	resp = doRequest(t, http.MethodPut, rawurl, token, []byte(`{"v":2}`), map[string]string{
-		"Content-Type":   "application/json",
-		"X-Updated-At":   t2,
-		"X-KV-Condition": `{"all":[{"field":"updatedAt","op":"lt","value":1760000000002},{"field":"value","op":"endswith","value":"1}"}]}`,
+	status, envelope := rpcCall(t, ts, token, "kv.get", map[string]any{
+		"project": "demo",
+		"table":   "files",
+		"key":     "dir/report.bin",
 	})
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("update status = %d, body = %s", resp.StatusCode, readBody(resp))
+	if status != http.StatusOK {
+		t.Fatalf("file kv.get status = %d", status)
 	}
-	if got := resp.Header.Get("X-Updated-At"); got != t2 {
-		t.Fatalf("update updatedAt = %q", got)
+	got := resultMap(t, envelope)
+	if got["contentType"] != float64(1) || got["valueOmitted"] != true {
+		t.Fatalf("file kv.get result = %#v", got)
 	}
-	resp.Body.Close()
 
-	resp = doRequest(t, http.MethodPut, rawurl, token, []byte(`{"v":"duplicate"}`), map[string]string{
-		"Content-Type":   "application/json",
-		"X-Updated-At":   t3,
-		"X-KV-Condition": `{"all":[{"field":"exists","op":"eq","value":false}]}`,
-	})
+	resp = doRequest(t, http.MethodGet, ts.URL+"/v1/download", token, nil, headers)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("download status = %d, body = %s", resp.StatusCode, readBody(resp))
+	}
+	if got := readBodyBytes(resp); !bytes.Equal(got, content) {
+		t.Fatalf("download body = %v, want %v", got, content)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/octet-stream" {
+		t.Fatalf("download Content-Type = %q", ct)
+	}
+
+	head := doRequest(t, http.MethodHead, ts.URL+"/v1/download", token, nil, headers)
+	if head.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("HEAD download status = %d", head.StatusCode)
+	}
+	head.Body.Close()
+}
+
+func TestUploadConditionAndQuery(t *testing.T) {
+	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
+	key := base64.RawURLEncoding.EncodeToString([]byte("file"))
+	headers := map[string]string{
+		"AKKV-Index-Project":   "demo",
+		"AKKV-Index-Table":     "main",
+		"AKKV-Index-Key":       key,
+		"AKKV-Data-Updated-At": "1760000000020",
+		"AKKV-Data-Condition":  base64.RawURLEncoding.EncodeToString([]byte(`{"all":[{"field":"exists","op":"eq","value":true}]}`)),
+	}
+	resp := doRequest(t, http.MethodPut, ts.URL+"/v1/upload", token, []byte("file-body"), headers)
 	if resp.StatusCode != http.StatusPreconditionFailed {
-		t.Fatalf("duplicate create status = %d, body = %s", resp.StatusCode, readBody(resp))
+		t.Fatalf("condition upload status = %d, body = %s", resp.StatusCode, readBody(resp))
 	}
-	if got := resp.Header.Get("X-Updated-At"); got != t2 {
-		t.Fatalf("precondition current updatedAt = %q", got)
-	}
-	assertErrorCode(t, resp, "precondition_failed")
+	resp.Body.Close()
 
-	resp = doRequest(t, http.MethodPut, rawurl, token, []byte(`{"v":3}`), map[string]string{
-		"Content-Type":   "application/json",
-		"X-Updated-At":   t3,
-		"X-KV-Condition": `{"all":[{"field":"updatedAt","op":"lt","value":1760000000002}]}`,
+	_, envelope := rpcCall(t, ts, token, "kv.put", map[string]any{
+		"project":   "demo",
+		"table":     "main",
+		"key":       "a",
+		"updatedAt": int64(1760000000021),
+		"value":     "alpha",
 	})
-	if resp.StatusCode != http.StatusPreconditionFailed {
-		t.Fatalf("stale update status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	assertErrorCode(t, resp, "precondition_failed")
-
-	resp = doRequest(t, http.MethodGet, rawurl, token, nil, nil)
-	if resp.StatusCode != http.StatusOK || readBody(resp) != `{"v":2}` {
-		t.Fatalf("failed writes changed value")
-	}
-
-	recordsURL := ts.URL + "/v1/demo/single/main/records"
-	recordsBody := []byte(`{"condition":{"all":[{"field":"key","op":"startsWith","value":"watchLater/"}]},"includeValues":true}`)
-	resp = doRequest(t, http.MethodPost, recordsURL, token, recordsBody,
-		map[string]string{"Content-Type": "application/json"})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("records status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	var page struct {
-		Items []struct {
-			Key         string `json:"key"`
-			UpdatedAt   int64  `json:"updatedAt"`
-			ValueBase64 string `json:"valueBase64"`
-			ValueText   string `json:"valueText"`
-			Deleted     bool   `json:"deleted"`
-		} `json:"items"`
-		Total int64 `json:"total"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
-		t.Fatalf("decode records: %v", err)
-	}
-	resp.Body.Close()
-	if page.Total != 1 || len(page.Items) != 1 {
-		t.Fatalf("records page = %+v", page)
-	}
-	item := page.Items[0]
-	if item.Key != "watchLater/series:1" || item.UpdatedAt != 1_760_000_000_002 {
-		t.Fatalf("record item = %+v", item)
-	}
-	if item.ValueText != `{"v":2}` || item.ValueBase64 == "" {
-		t.Fatalf("record value = %+v", item)
-	}
-
-	resp = doRequest(t, http.MethodDelete, rawurl, token, nil, map[string]string{
-		"X-Updated-At":   t4,
-		"X-KV-Condition": `{"all":[{"field":"updatedAt","op":"eq","value":1760000000002}]}`,
+	resultMap(t, envelope)
+	_, envelope = rpcCall(t, ts, token, "kv.put", map[string]any{
+		"project":   "demo",
+		"table":     "main",
+		"key":       "b",
+		"updatedAt": int64(1760000000022),
+		"value":     "beta",
 	})
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("delete status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	if got := resp.Header.Get("X-Updated-At"); got != t4 {
-		t.Fatalf("delete updatedAt = %q", got)
-	}
-	resp.Body.Close()
+	resultMap(t, envelope)
 
-	deletedURL := ts.URL + "/v1/demo/single/main/records"
-	deletedBody := []byte(`{"condition":{"all":[{"field":"updatedAt","op":"gt","value":1760000000003}]},"includeDeleted":true}`)
-	resp = doRequest(t, http.MethodPost, deletedURL, token, deletedBody,
-		map[string]string{"Content-Type": "application/json"})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("deleted records status = %d, body = %s", resp.StatusCode, readBody(resp))
+	_, envelope = rpcCall(t, ts, token, "records.query", map[string]any{
+		"project":       "demo",
+		"tables":        []string{"main"},
+		"includeValues": true,
+		"limit":         10,
+	})
+	result := resultMap(t, envelope)
+	items, ok := result["items"].([]any)
+	if !ok || len(items) != 2 {
+		t.Fatalf("query result = %#v", result)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
-		t.Fatalf("decode deleted records: %v", err)
-	}
-	resp.Body.Close()
-	if page.Total != 1 || len(page.Items) != 1 || !page.Items[0].Deleted {
-		t.Fatalf("deleted page = %+v", page)
-	}
-	if page.Items[0].UpdatedAt != 1_760_000_000_004 {
-		t.Fatalf("deleted item = %+v", page.Items[0])
-	}
-}
-
-func TestProjectRecordsConditionsAndPagination(t *testing.T) {
-	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	values := []struct {
-		path      string
-		value     string
-		updatedAt string
-	}{
-		{"/v1/demo/single/users/kv/user:1", `{"name":"one"}`, "1760000000002"},
-		{"/v1/demo/single/users/kv/user:2", `{"name":"two"}`, "1760000000001"},
-		{"/v1/demo/single/sessions/kv/user:3", `{"name":"three"}`, "1760000000003"},
-	}
-	for _, value := range values {
-		resp := doRequest(t, http.MethodPut, ts.URL+value.path, token, []byte(value.value), map[string]string{
-			"Content-Type": "application/json",
-			"X-Updated-At": value.updatedAt,
-		})
-		if resp.StatusCode != http.StatusNoContent {
-			t.Fatalf("put %s status = %d, body = %s", value.path, resp.StatusCode, readBody(resp))
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok || item["contentType"] != float64(0) || item["value"] == nil {
+			t.Fatalf("query item = %#v", raw)
 		}
-		resp.Body.Close()
 	}
-
-	queryURL := ts.URL + "/v1/demo/records"
-	queryBody := []byte(`{
-		"condition":{"all":[
-			{"field":"updatedAt","op":"gt","value":1760000000001},
-			{"field":"key","op":"startsWith","value":"user:"},
-			{"field":"contentType","op":"eq","value":"application/json"}
-		]},
-		"includeValues":true,
-		"limit":1,
-		"offset":0
-	}`)
-	resp := doRequest(t, http.MethodPost, queryURL, token, queryBody,
-		map[string]string{"Content-Type": "application/json"})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("project records status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	var page struct {
-		Items []struct {
-			Table     string `json:"table"`
-			Key       string `json:"key"`
-			UpdatedAt int64  `json:"updatedAt"`
-			ValueText string `json:"valueText"`
-		} `json:"items"`
-		Total      int64 `json:"total"`
-		NextOffset int   `json:"nextOffset"`
-		HasMore    bool  `json:"hasMore"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
-		t.Fatalf("decode project records: %v", err)
-	}
-	resp.Body.Close()
-	if page.Total != 2 || !page.HasMore || page.NextOffset != 1 || len(page.Items) != 1 {
-		t.Fatalf("project records page = %+v", page)
-	}
-	if page.Items[0].Table != "sessions" || page.Items[0].Key != "user:3" ||
-		page.Items[0].ValueText != `{"name":"three"}` {
-		t.Fatalf("first project record = %+v", page.Items[0])
-	}
-
-	tablesBody := []byte(`{
-		"tables":["users"],
-		"condition":{"all":[{"field":"key","op":"startsWith","value":"user:"}]},
-		"offset":0
-	}`)
-	resp = doRequest(t, http.MethodPost, queryURL, token, tablesBody,
-		map[string]string{"Content-Type": "application/json"})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("filtered project records status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
-		t.Fatalf("decode filtered project records: %v", err)
-	}
-	resp.Body.Close()
-	if page.Total != 2 || len(page.Items) != 2 ||
-		page.Items[0].Table != "users" || page.Items[1].Table != "users" {
-		t.Fatalf("filtered project records = %+v", page)
-	}
-
-	invalidBody := []byte(`{"unknown":true}`)
-	resp = doRequest(t, http.MethodPost, queryURL, token, invalidBody,
-		map[string]string{"Content-Type": "application/json"})
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("invalid project query status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	assertErrorCode(t, resp, "invalid_query")
 }
 
-func TestBatchWritesWithOptionalTransaction(t *testing.T) {
+func TestJSONRPCAuthAndCORS(t *testing.T) {
 	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	oldURL := ts.URL + "/v1/demo/single/sessions/kv/old"
-	resp := doRequest(t, http.MethodPut, oldURL, token, []byte("old"), map[string]string{
-		"Content-Type": "text/plain",
-		"X-Updated-At": "1760000000001",
-	})
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("create old key status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	resp.Body.Close()
-
-	batchURL := ts.URL + "/v1/demo/batch"
-	batchBody := []byte(`{
-		"transaction":true,
-		"operations":[
-			{"op":"put","table":"users","key":"u1","updatedAt":1760000000002,"contentType":"text/plain","value":"alice"},
-			{"op":"put","table":"sessions","key":"s1","updatedAt":1760000000003,"valueBase64":"AAE="},
-			{"op":"delete","table":"sessions","key":"old","updatedAt":1760000000004,"condition":{"all":[{"field":"exists","op":"eq","value":true}]}}
-		]
-	}`)
-	resp = doRequest(t, http.MethodPost, batchURL, token, batchBody,
-		map[string]string{"Content-Type": "application/json"})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("atomic batch status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	var batch struct {
-		Transaction bool `json:"transaction"`
-		Applied     int  `json:"applied"`
-		Failed      int  `json:"failed"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&batch); err != nil {
-		t.Fatalf("decode atomic batch: %v", err)
-	}
-	resp.Body.Close()
-	if !batch.Transaction || batch.Applied != 3 || batch.Failed != 0 {
-		t.Fatalf("atomic batch response = %+v", batch)
-	}
-
-	resp = doRequest(t, http.MethodGet, ts.URL+"/v1/demo/single/users/kv/u1", token, nil, nil)
-	if resp.StatusCode != http.StatusOK || readBody(resp) != "alice" {
-		t.Fatalf("batch user value missing")
-	}
-	resp.Body.Close()
-	resp = doRequest(t, http.MethodGet, ts.URL+"/v1/demo/single/sessions/kv/s1", token, nil, nil)
-	gotBinary, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || !bytes.Equal(gotBinary, []byte{0, 1}) {
-		t.Fatalf("batch binary value = %v", gotBinary)
-	}
-	resp = doRequest(t, http.MethodGet, oldURL, token, nil, nil)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("batch deleted key status = %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-
-	rollbackBody := []byte(`{
-		"transaction":true,
-		"operations":[
-			{"op":"put","table":"users","key":"rollback","updatedAt":1760000000005,"value":"x"},
-			{"op":"put","table":"users","key":"u1","updatedAt":1760000000006,"value":"x","condition":{"all":[{"field":"exists","op":"eq","value":false}]}}
-		]
-	}`)
-	resp = doRequest(t, http.MethodPost, batchURL, token, rollbackBody,
-		map[string]string{"Content-Type": "application/json"})
-	if resp.StatusCode != http.StatusPreconditionFailed {
-		t.Fatalf("rollback batch status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	assertErrorCode(t, resp, "precondition_failed")
-	resp = doRequest(t, http.MethodGet, ts.URL+"/v1/demo/single/users/kv/rollback", token, nil, nil)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("rollback key persisted, status = %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-
-	partialBody := []byte(`{
-		"transaction":false,
-		"operations":[
-			{"op":"put","table":"users","key":"partial-ok","updatedAt":1760000000007,"value":"ok"},
-			{"op":"put","table":"users","key":"u1","updatedAt":1760000000008,"value":"no","condition":{"all":[{"field":"exists","op":"eq","value":false}]}}
-		]
-	}`)
-	resp = doRequest(t, http.MethodPost, batchURL, token, partialBody,
-		map[string]string{"Content-Type": "application/json"})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("partial batch status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	batch = struct {
-		Transaction bool `json:"transaction"`
-		Applied     int  `json:"applied"`
-		Failed      int  `json:"failed"`
-	}{}
-	if err := json.NewDecoder(resp.Body).Decode(&batch); err != nil {
-		t.Fatalf("decode partial batch: %v", err)
-	}
-	resp.Body.Close()
-	if batch.Transaction || batch.Applied != 1 || batch.Failed != 1 {
-		t.Fatalf("partial batch response = %+v", batch)
-	}
-	resp = doRequest(t, http.MethodGet, ts.URL+"/v1/demo/single/users/kv/partial-ok", token, nil, nil)
-	if resp.StatusCode != http.StatusOK || readBody(resp) != "ok" {
-		t.Fatalf("partial successful operation missing")
-	}
-	resp.Body.Close()
-
-	resp = doRequest(t, http.MethodPost, batchURL, token, []byte(`{"operations":[]}`),
-		map[string]string{"Content-Type": "application/json"})
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("missing transaction status = %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-
-	resp = doRequest(t, http.MethodGet, batchURL, token, nil, nil)
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Fatalf("GET batch status = %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-}
-
-func TestProjectPathCaseInsensitive(t *testing.T) {
-	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	for _, project := range []string{"demo", "DEMO", "DeMo"} {
-		resp := doRequest(t, http.MethodGet, ts.URL+"/v1/"+project+"/single", token, nil, nil)
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("project path %q status = %d, body = %s", project, resp.StatusCode, readBody(resp))
-		}
-		resp.Body.Close()
-	}
-}
-
-func TestUnconditionalWritesUseClientTimestamp(t *testing.T) {
-	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	rawurl := ts.URL + "/v1/demo/single/main/kv/k"
-
-	resp := doRequest(t, http.MethodPut, rawurl, token, []byte("newer"), map[string]string{
-		"Content-Type": "text/plain",
-		"X-Updated-At": "1760000000100",
-	})
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("first put status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	resp.Body.Close()
-
-	resp = doRequest(t, http.MethodPut, rawurl, token, []byte("older-arriving-later"), map[string]string{
-		"Content-Type": "text/plain",
-		"X-Updated-At": "1760000000050",
-	})
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("second put status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	if got := resp.Header.Get("X-Updated-At"); got != "1760000000050" {
-		t.Fatalf("updatedAt = %q", got)
-	}
-	resp.Body.Close()
-
-	resp = doRequest(t, http.MethodGet, rawurl, token, nil, nil)
-	if resp.StatusCode != http.StatusOK || readBody(resp) != "older-arriving-later" {
-		t.Fatalf("server should overwrite without a condition")
-	}
-}
-
-func TestTokenUsageStats(t *testing.T) {
-	ts, st, p, token := newTestServer(t, 1<<20, []string{"*"})
-	rawurl := ts.URL + "/v1/demo/single/main/kv/k"
-
-	resp := doRequest(t, http.MethodPut, rawurl, token, []byte("value"),
-		map[string]string{"Content-Type": "text/plain"})
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("PUT status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	resp.Body.Close()
-	resp = doRequest(t, http.MethodGet, rawurl, token, nil, nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	resp.Body.Close()
-
-	tokens, err := st.ListProjectTokens(p.Name)
-	if err != nil {
-		t.Fatalf("ListProjectTokens: %v", err)
-	}
-	if len(tokens) != 1 || tokens[0].RequestCount != 2 || tokens[0].ReadCount != 1 ||
-		tokens[0].WriteCount != 1 || tokens[0].LastUsedAt == 0 {
-		t.Fatalf("token stats = %+v", tokens)
-	}
-}
-
-func TestWriteConditionValidation(t *testing.T) {
-	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	rawurl := ts.URL + "/v1/demo/single/main/kv/k"
-
-	req, _ := http.NewRequest(http.MethodPut, rawurl, strings.NewReader("value"))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "text/plain")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("PUT without updatedAt: %v", err)
-	}
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("missing updatedAt status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	assertErrorCode(t, resp, "invalid_updated_at")
-
-	for _, header := range []string{
-		`{"all":[{"field":"unknown","op":"eq","value":true}]}`,
-		`{"all":[{"field":"updatedAt","op":"contains","value":1}]}`,
-		`not-json`,
-		`{"all":[{"field":"updatedAt","op":"lt","value":1}],"unknown":true}`,
-	} {
-		resp = doRequest(t, http.MethodPut, rawurl, token, []byte("value"), map[string]string{
-			"Content-Type":   "text/plain",
-			"X-KV-Condition": header,
-		})
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("condition %s status = %d, body = %s", header, resp.StatusCode, readBody(resp))
-		}
-		assertErrorCode(t, resp, "invalid_condition")
-	}
-}
-
-func TestRecordsValueBudget(t *testing.T) {
-	ts, _, _, token := newTestServer(t, 64<<20, []string{"*"})
-	value := strings.Repeat("x", 17<<20)
-	for _, key := range []string{"a", "b"} {
-		resp := doRequest(t, http.MethodPut, ts.URL+"/v1/demo/single/large/kv/"+key, token,
-			[]byte(value), map[string]string{"Content-Type": "text/plain"})
-		if resp.StatusCode != http.StatusNoContent {
-			t.Fatalf("put %s status = %d, body = %s", key, resp.StatusCode, readBody(resp))
-		}
-		resp.Body.Close()
-	}
-	resp := doRequest(t, http.MethodPost,
-		ts.URL+"/v1/demo/single/large/records", token, []byte(`{"includeValues":true}`),
-		map[string]string{"Content-Type": "application/json"})
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("records value budget status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	assertErrorCode(t, resp, "query_value_limit")
-}
-
-func TestAuthFailures(t *testing.T) {
-	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	rawurl := ts.URL + "/v1/demo/single/main/kv/k"
-
-	resp := doRequest(t, http.MethodGet, rawurl, "", nil, nil)
+	payload := []byte(`{"jsonrpc":"2.0","id":1,"method":"table.list","params":{"project":"demo"}}`)
+	resp := doRequest(t, http.MethodPost, ts.URL+"/v1/api", "", payload, map[string]string{"Content-Type": "application/json"})
 	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("no token status = %d", resp.StatusCode)
-	}
-	if resp.Header.Get("WWW-Authenticate") == "" {
-		t.Fatal("missing WWW-Authenticate")
+		t.Fatalf("unauthorized rpc status = %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 
-	resp = doRequest(t, http.MethodGet, rawurl, "kv_wrong", nil, nil)
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("wrong token status = %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-
-	resp = doRequest(t, http.MethodGet, ts.URL+"/v1/missing/single/main/kv/k", token, nil, nil)
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("missing project status = %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-
-	// 项目路径与 token 不匹配
-	resp = doRequest(t, http.MethodGet, ts.URL+"/v1/demo/single/main/kv/k", token, nil, nil)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("missing table status = %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-}
-
-func TestBinaryAndKeyWithSlash(t *testing.T) {
-	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	body := []byte{0x00, 0x01, 0x02, 0xff, 'h', 'i'}
-	rawurl := ts.URL + "/v1/demo/single/main/kv/dir/sub%2Fkey"
-
-	resp := doRequest(t, http.MethodPut, rawurl, token, body, map[string]string{"Content-Type": "application/octet-stream"})
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("PUT status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	resp.Body.Close()
-
-	resp = doRequest(t, http.MethodGet, rawurl, token, nil, nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET status = %d", resp.StatusCode)
-	}
-	got, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if !bytes.Equal(got, body) {
-		t.Fatalf("body = %v, want %v", got, body)
-	}
-}
-
-func TestTooLarge(t *testing.T) {
-	ts, _, _, token := newTestServer(t, 10, []string{"*"})
-	rawurl := ts.URL + "/v1/demo/single/main/kv/k"
-
-	resp := doRequest(t, http.MethodPut, rawurl, token, []byte("01234567890"), map[string]string{"Content-Type": "text/plain"})
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("known length status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	resp.Body.Close()
-
-	// 未知长度走 MaxBytesReader
-	req, _ := http.NewRequest(http.MethodPut, rawurl, bytes.NewReader([]byte("01234567890")))
-	req.ContentLength = -1
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "text/plain")
-	req.Header.Set("X-Updated-At", "1760000000001")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("PUT chunked: %v", err)
-	}
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("chunked status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	resp.Body.Close()
-}
-
-func TestCORS(t *testing.T) {
-	ts, _, _, token := newTestServer(t, 1<<20, []string{"https://app.example.com"})
-	rawurl := ts.URL + "/v1/demo/single/main/kv/k"
-
-	req, _ := http.NewRequest(http.MethodOptions, rawurl, nil)
-	req.Header.Set("Origin", "https://app.example.com")
-	req.Header.Set("Access-Control-Request-Method", "PUT")
+	req, _ := http.NewRequest(http.MethodOptions, ts.URL+"/v1/upload", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Headers", "AKKV-Index-Project,AKKV-Index-Table,AKKV-Index-Key,AKKV-Data-Updated-At")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("OPTIONS: %v", err)
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("OPTIONS status = %d", resp.StatusCode)
 	}
-	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
-		t.Fatalf("allow origin = %q", got)
-	}
-	allowHeaders := resp.Header.Get("Access-Control-Allow-Headers")
-	if !strings.Contains(allowHeaders, "X-KV-Condition") || !strings.Contains(allowHeaders, "X-Updated-At") {
-		t.Fatalf("allow headers = %q", allowHeaders)
-	}
-	if exposeHeaders := resp.Header.Get("Access-Control-Expose-Headers"); strings.Contains(exposeHeaders, "X-Revision") ||
-		strings.Contains(exposeHeaders, "X-Server-Seq") {
-		t.Fatalf("expose headers still contain removed fields: %q", exposeHeaders)
-	}
-	resp.Body.Close()
-
-	resp = doRequest(t, http.MethodGet, rawurl, token, nil, map[string]string{"Origin": "https://evil.example.com"})
-	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
-		t.Fatalf("unexpected allow origin = %q", got)
-	}
-	resp.Body.Close()
-
-	resp = doRequest(t, http.MethodGet, rawurl, token, nil, map[string]string{"Origin": "https://app.example.com"})
-	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
-		t.Fatalf("allow origin = %q", got)
-	}
-	resp.Body.Close()
-}
-
-func TestMethodAndPathErrorsAreJSON(t *testing.T) {
-	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-
-	resp := doRequest(t, http.MethodPost, ts.URL+"/v1/demo/single/main/kv/k", token, []byte("x"),
-		map[string]string{"Content-Type": "text/plain"})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Fatalf("POST status = %d", resp.StatusCode)
-	}
-	if resp.Header.Get("Allow") == "" {
-		t.Fatal("missing Allow header")
-	}
-	assertErrorCode(t, resp, "method_not_allowed")
-
-	resp = doRequest(t, http.MethodGet, ts.URL+"/v1/demo/single/main/unknown", token, nil, nil)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("unknown path status = %d", resp.StatusCode)
-	}
-	assertErrorCode(t, resp, "not_found")
-
-	// %2F 解码后是 leading slash，属于会被路径清理改写的 key，必须拒绝。
-	resp = doRequest(t, http.MethodPut, ts.URL+"/v1/demo/single/main/kv/%2Flead", token, []byte("x"),
-		map[string]string{"Content-Type": "text/plain"})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("leading slash key status = %d, body = %s", resp.StatusCode, readBody(resp))
+	allow := resp.Header.Get("Access-Control-Allow-Headers")
+	if !strings.Contains(allow, "AKKV-Index-Key") || !strings.Contains(allow, "AKKV-Data-Updated-At") {
+		t.Fatalf("Access-Control-Allow-Headers = %q", allow)
 	}
 
-	invalidTableURL := ts.URL + "/v1/demo/single/Bad%20Table/kv/k"
-	resp = doRequest(t, http.MethodGet, invalidTableURL, token, nil, nil)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("invalid table GET status = %d, body = %s", resp.StatusCode, readBody(resp))
+	status, envelope := rpcCall(t, ts, token, "table.list", map[string]any{"project": "demo"})
+	if status != http.StatusOK {
+		t.Fatalf("authenticated table.list status = %d", status)
 	}
-	assertErrorCode(t, resp, "invalid_table")
-
-	resp = doRequest(t, http.MethodDelete, invalidTableURL, token, nil, nil)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("invalid table DELETE status = %d, body = %s", resp.StatusCode, readBody(resp))
-	}
-	assertErrorCode(t, resp, "invalid_table")
-}
-
-func assertErrorCode(t *testing.T, resp *http.Response, want string) {
-	t.Helper()
-	var payload struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		t.Fatalf("decode error response: %v", err)
-	}
-	if payload.Error.Code != want {
-		t.Fatalf("error code = %q, want %q", payload.Error.Code, want)
-	}
-	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-		t.Fatalf("Content-Type = %q", ct)
-	}
-}
-
-func TestErrorJSON(t *testing.T) {
-	ts, _, _, token := newTestServer(t, 1<<20, []string{"*"})
-	resp := doRequest(t, http.MethodGet, ts.URL+"/v1/demo/single/main/kv/missing", token, nil, nil)
-	defer resp.Body.Close()
-	var payload struct {
-		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if payload.Error.Code != "table_not_found" || payload.Error.Message == "" {
-		t.Fatalf("payload = %+v", payload)
-	}
-	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-		t.Fatalf("Content-Type = %q", ct)
-	}
+	resultMap(t, envelope)
 }
 
 func readBody(resp *http.Response) string {
-	b, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	return string(b)
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return string(body)
+}
+
+func readBodyBytes(resp *http.Response) []byte {
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return body
 }

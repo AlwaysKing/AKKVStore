@@ -12,11 +12,7 @@
     </form>
     <form id="inline-value-edit-form" class="inline-editor-form" method="post" enctype="multipart/form-data">
       <input type="hidden" name="action" value="save">
-      <input type="hidden" name="content_type" data-inline-content-type>
       <input type="hidden" name="require_file" data-inline-require-file>
-    </form>
-    <form id="inline-content-type-edit-form" class="inline-editor-form" method="post" action="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}/key/content-type">
-      <input type="hidden" name="key" data-inline-content-type-key>
     </form>
     <form id="inline-key-rename-form" class="inline-editor-form" method="post" action="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}/key/rename">
       <input type="hidden" name="old_key" data-inline-old-key>
@@ -56,7 +52,7 @@
             <tr>
               <th>Key</th>
               <th>Value</th>
-              <th>Content-Type</th>
+              <th>类型</th>
               <th>Size</th>
               <th>Updated At</th>
               <th>操作</th>
@@ -77,10 +73,7 @@
                   data-edit-url="/admin/projects/{{path $.Project.Name}}/tables/{{path $.Table.Name}}/key?return_to=table&key={{urlquery .Key}}">
                 <span class="value-preview">{{.ValuePreview}}</span>
               </td>
-              <td class="editable-cell muted content-type content-type-cell"
-                  data-cell="content-type"
-                  data-key="{{.Key}}"
-                  data-content-type="{{.ContentType}}">{{.ContentType}}</td>
+              <td class="muted content-type content-type-cell">{{valueTypeLabel .ContentType}}</td>
               <td>{{humanSize .Size}}</td>
               <td class="muted updated-at-cell">{{formatTime .UpdatedAt}}</td>
               <td class="action-cell">
@@ -114,7 +107,7 @@
                   </label>
                 </div>
               </td>
-              <td><input form="new-key-inline-form" name="content_type" value="application/json" placeholder="application/json"></td>
+              <td class="muted">string</td>
               <td></td>
               <td></td>
               <td class="action-cell">

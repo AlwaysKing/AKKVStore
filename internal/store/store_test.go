@@ -374,11 +374,11 @@ func TestTableLifecycleIsolationAndStats(t *testing.T) {
 		t.Fatalf("invalid table err = %v, want ErrInvalid", err)
 	}
 
-	first, err := s.PutKey(p, users.Name, "a", "text/plain", strings.NewReader("one"))
+	first, err := s.PutKey(p, users.Name, "a", ValueTypeString, strings.NewReader("one"))
 	if err != nil {
 		t.Fatalf("put users: %v", err)
 	}
-	second, err := s.PutKey(p, settings.Name, "a", "text/plain", strings.NewReader("two"))
+	second, err := s.PutKey(p, settings.Name, "a", ValueTypeString, strings.NewReader("two"))
 	if err != nil {
 		t.Fatalf("put settings: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestPutAutoCreatesTableAndHandlesValues(t *testing.T) {
 	s, _ := openTestStore(t, 1<<20, 32)
 	p, _ := mustProject(t, s, "demo")
 
-	meta, err := s.PutKey(p, "auto", "user:1", "application/json", strings.NewReader(`{"name":"张三"}`))
+	meta, err := s.PutKey(p, "auto", "user:1", ValueTypeString, strings.NewReader(`{"name":"张三"}`))
 	if err != nil {
 		t.Fatalf("PutKey inline: %v", err)
 	}
@@ -537,15 +537,15 @@ func TestPutAutoCreatesTableAndHandlesValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetKey: %v", err)
 	}
-	if got.ContentType != "application/json" {
-		t.Fatalf("content type = %q", got.ContentType)
+	if got.ContentType != ValueTypeString {
+		t.Fatalf("content type = %v", got.ContentType)
 	}
 	if body := mustRead(t, rc); body != `{"name":"张三"}` {
 		t.Fatalf("body = %q", body)
 	}
 
 	big := strings.Repeat("x", 100)
-	meta, err = s.PutKey(p, table.Name, "user:1", "text/plain", strings.NewReader(big))
+	meta, err = s.PutKey(p, table.Name, "user:1", ValueTypeString, strings.NewReader(big))
 	if err != nil {
 		t.Fatalf("PutKey external: %v", err)
 	}
@@ -562,7 +562,7 @@ func TestPutAutoCreatesTableAndHandlesValues(t *testing.T) {
 		t.Fatalf("external body length = %d", len(body))
 	}
 
-	meta, err = s.PutKey(p, table.Name, "user:1", "text/plain", strings.NewReader("small again"))
+	meta, err = s.PutKey(p, table.Name, "user:1", ValueTypeString, strings.NewReader("small again"))
 	if err != nil {
 		t.Fatalf("PutKey inline again: %v", err)
 	}
@@ -589,7 +589,7 @@ func TestRenameKey(t *testing.T) {
 	p, _ := mustProject(t, s, "demo")
 	table := mustTable(t, s, p, "state")
 	body := strings.Repeat("rename-", 20)
-	_, err := s.PutKey(p, table.Name, "old", "text/plain", strings.NewReader(body))
+	_, err := s.PutKey(p, table.Name, "old", ValueTypeString, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("put old: %v", err)
 	}
@@ -620,7 +620,7 @@ func TestRenameKey(t *testing.T) {
 		t.Fatalf("rename tombstone = %+v", deleted)
 	}
 
-	if _, err := s.PutKey(p, table.Name, "occupied", "text/plain", strings.NewReader("x")); err != nil {
+	if _, err := s.PutKey(p, table.Name, "occupied", ValueTypeString, strings.NewReader("x")); err != nil {
 		t.Fatalf("put occupied: %v", err)
 	}
 	if _, err := s.RenameKey(p, table.Name, "new", "occupied"); !errors.Is(err, ErrKeyExists) {
@@ -638,21 +638,21 @@ func TestRenameKey(t *testing.T) {
 	}
 }
 
-func TestUpdateKeyContentTypePreservesValue(t *testing.T) {
+func TestUpdateKeyValueTypePreservesValue(t *testing.T) {
 	s, _ := openTestStore(t, 1<<20, 16)
 	p, _ := mustProject(t, s, "demo")
 	table := mustTable(t, s, p, "main")
 	body := strings.Repeat("preserve-", 20)
-	first, err := s.PutKey(p, table.Name, "k", "text/plain", strings.NewReader(body))
+	first, err := s.PutKey(p, table.Name, "k", ValueTypeString, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("PutKey: %v", err)
 	}
 
-	updated, err := s.UpdateKeyContentType(p, table.Name, "k", "application/octet-stream", 1_760_000_001_000)
+	updated, err := s.UpdateKeyValueType(p, table.Name, "k", ValueTypeFile, 1_760_000_001_000)
 	if err != nil {
-		t.Fatalf("UpdateKeyContentType: %v", err)
+		t.Fatalf("UpdateKeyValueType: %v", err)
 	}
-	if updated.ContentType != "application/octet-stream" || updated.ContentHash != first.ContentHash ||
+	if updated.ContentType != ValueTypeFile || updated.ContentHash != first.ContentHash ||
 		updated.Size != first.Size || updated.UpdatedAt != 1_760_000_001_000 {
 		t.Fatalf("updated meta = %+v", updated)
 	}
@@ -660,13 +660,13 @@ func TestUpdateKeyContentTypePreservesValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetKey: %v", err)
 	}
-	if meta.ContentType != "application/octet-stream" {
-		t.Fatalf("content type = %q", meta.ContentType)
+	if meta.ContentType != ValueTypeFile {
+		t.Fatalf("content type = %v", meta.ContentType)
 	}
 	if got := mustRead(t, rc); got != body {
 		t.Fatalf("value changed after content type update")
 	}
-	if _, err := s.UpdateKeyContentType(p, table.Name, "missing", "text/plain", 1_760_000_001_001); !errors.Is(err, ErrNotFound) {
+	if _, err := s.UpdateKeyValueType(p, table.Name, "missing", ValueTypeString, 1_760_000_001_001); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing key err = %v, want ErrNotFound", err)
 	}
 }
@@ -676,10 +676,10 @@ func TestPutKeyCreateRejectsDuplicate(t *testing.T) {
 	p, _ := mustProject(t, s, "demo")
 	table := mustTable(t, s, p, "main")
 
-	if _, err := s.PutKeyCreate(p, table.Name, "k", "text/plain", strings.NewReader("first")); err != nil {
+	if _, err := s.PutKeyCreate(p, table.Name, "k", ValueTypeString, strings.NewReader("first")); err != nil {
 		t.Fatalf("first PutKeyCreate: %v", err)
 	}
-	if _, err := s.PutKeyCreate(p, table.Name, "k", "text/plain", strings.NewReader("second")); !errors.Is(err, ErrKeyExists) {
+	if _, err := s.PutKeyCreate(p, table.Name, "k", ValueTypeString, strings.NewReader("second")); !errors.Is(err, ErrKeyExists) {
 		t.Fatalf("duplicate PutKeyCreate err = %v, want ErrKeyExists", err)
 	}
 	if _, rc, err := s.GetKey(p, table.Name, "k"); err != nil {
@@ -690,7 +690,7 @@ func TestPutKeyCreateRejectsDuplicate(t *testing.T) {
 	if err := s.DeleteKey(p, table.Name, "k"); err != nil {
 		t.Fatalf("DeleteKey: %v", err)
 	}
-	if _, err := s.PutKeyCreate(p, table.Name, "k", "text/plain", strings.NewReader("recreated")); err != nil {
+	if _, err := s.PutKeyCreate(p, table.Name, "k", ValueTypeString, strings.NewReader("recreated")); err != nil {
 		t.Fatalf("recreate deleted key: %v", err)
 	}
 }
@@ -701,11 +701,11 @@ func TestLargeValueDedupAndTableDeleteCleanup(t *testing.T) {
 	table := mustTable(t, s, p, "files")
 	body := strings.Repeat("same-content-", 20)
 
-	m1, err := s.PutKey(p, table.Name, "a", "text/plain", strings.NewReader(body))
+	m1, err := s.PutKey(p, table.Name, "a", ValueTypeString, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("put a: %v", err)
 	}
-	m2, err := s.PutKey(p, table.Name, "b", "text/plain", strings.NewReader(body))
+	m2, err := s.PutKey(p, table.Name, "b", ValueTypeString, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("put b: %v", err)
 	}
@@ -717,7 +717,7 @@ func TestLargeValueDedupAndTableDeleteCleanup(t *testing.T) {
 		t.Fatalf("blob missing: %v", err)
 	}
 
-	if _, err := s.PutKey(p, table.Name, "c", "text/plain", strings.NewReader(body)); err != nil {
+	if _, err := s.PutKey(p, table.Name, "c", ValueTypeString, strings.NewReader(body)); err != nil {
 		t.Fatalf("put c: %v", err)
 	}
 	if err := s.DeleteTable(p, table.Name); err != nil {
@@ -733,7 +733,7 @@ func TestListKeysPrefixAndPagination(t *testing.T) {
 	p, _ := mustProject(t, s, "demo")
 	table := mustTable(t, s, p, "records")
 	for _, k := range []string{"a:1", "a:2", "a:3", "b:1", "中文:键"} {
-		if _, err := s.PutKey(p, table.Name, k, "text/plain", strings.NewReader("v")); err != nil {
+		if _, err := s.PutKey(p, table.Name, k, ValueTypeString, strings.NewReader("v")); err != nil {
 			t.Fatalf("put %q: %v", k, err)
 		}
 	}
@@ -762,22 +762,22 @@ func TestMaxValueAndValidation(t *testing.T) {
 	s, _ := openTestStore(t, 10, 4)
 	p, _ := mustProject(t, s, "demo")
 
-	if _, err := s.PutKey(p, "limits", "k", "text/plain", strings.NewReader("01234567890")); !errors.Is(err, ErrTooLarge) {
+	if _, err := s.PutKey(p, "limits", "k", ValueTypeString, strings.NewReader("01234567890")); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("err = %v, want ErrTooLarge", err)
 	}
 	if _, err := s.GetTable(p, "limits"); !errors.Is(err, ErrTableNotFound) {
 		t.Fatalf("failed write should not create table: %v", err)
 	}
-	if _, err := s.PutKey(p, "limits", "", "text/plain", strings.NewReader("x")); !errors.Is(err, ErrInvalid) {
+	if _, err := s.PutKey(p, "limits", "", ValueTypeString, strings.NewReader("x")); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("empty key err = %v, want ErrInvalid", err)
 	}
-	if _, err := s.PutKey(p, "Bad Table", "k", "text/plain", strings.NewReader("x")); !errors.Is(err, ErrInvalid) {
+	if _, err := s.PutKey(p, "Bad Table", "k", ValueTypeString, strings.NewReader("x")); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("bad table err = %v, want ErrInvalid", err)
 	}
-	if _, err := s.PutKey(p, "limits", "k", "not a media type", strings.NewReader("x")); !errors.Is(err, ErrInvalid) {
+	if _, err := s.PutKey(p, "limits", "k", ValueType(2), strings.NewReader("x")); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("bad content type err = %v, want ErrInvalid", err)
 	}
-	if _, err := s.PutKey(p, "limits", "k", "text/plain", strings.NewReader("0123456789")); err != nil {
+	if _, err := s.PutKey(p, "limits", "k", ValueTypeString, strings.NewReader("0123456789")); err != nil {
 		t.Fatalf("exact max: %v", err)
 	}
 }
@@ -804,7 +804,7 @@ func TestPutAfterProjectDelete(t *testing.T) {
 		t.Fatalf("DeleteProject: %v", err)
 	}
 	// 模拟一个已经通过鉴权、但在 project 删除后才完成上传的请求。
-	_, err := s.PutKey(p, "files", "k", "text/plain", strings.NewReader(strings.Repeat("x", 100)))
+	_, err := s.PutKey(p, "files", "k", ValueTypeString, strings.NewReader(strings.Repeat("x", 100)))
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("PutKey after delete err = %v, want ErrNotFound", err)
 	}
@@ -829,7 +829,7 @@ func TestStartupCleansTemporaryAndOrphanFiles(t *testing.T) {
 	p, _ := mustProject(t, s, "demo")
 	table := mustTable(t, s, p, "files")
 	body := strings.Repeat("keep-", 20)
-	meta, err := s.PutKey(p, table.Name, "keep", "text/plain", strings.NewReader(body))
+	meta, err := s.PutKey(p, table.Name, "keep", ValueTypeString, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("PutKey: %v", err)
 	}
@@ -880,7 +880,7 @@ func TestDeleteProjectRemovesDirectory(t *testing.T) {
 	s, dataDir := openTestStore(t, 1<<20, 32)
 	p, _ := mustProject(t, s, "demo")
 	table := mustTable(t, s, p, "files")
-	if _, err := s.PutKey(p, table.Name, "k", "text/plain", strings.NewReader(strings.Repeat("x", 100))); err != nil {
+	if _, err := s.PutKey(p, table.Name, "k", ValueTypeString, strings.NewReader(strings.Repeat("x", 100))); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 
@@ -916,7 +916,7 @@ func TestPersistenceAcrossReopen(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 	body := strings.Repeat("persist-", 10)
-	if _, err := s.PutKey(p, "data", "k", "text/plain", strings.NewReader(body)); err != nil {
+	if _, err := s.PutKey(p, "data", "k", ValueTypeString, strings.NewReader(body)); err != nil {
 		t.Fatalf("PutKey: %v", err)
 	}
 	if err := s.Close(); err != nil {
@@ -961,7 +961,7 @@ func TestConditionalWritesAndTombstones(t *testing.T) {
 		t5 = int64(1_760_000_000_005)
 	)
 	first, err := s.PutKeyConditional(
-		p, table.Name, "k", "application/json", strings.NewReader(`{"v":1}`), t1, WriteCondition{},
+		p, table.Name, "k", ValueTypeString, strings.NewReader(`{"v":1}`), t1, WriteCondition{},
 	)
 	if err != nil {
 		t.Fatalf("first put: %v", err)
@@ -974,12 +974,12 @@ func TestConditionalWritesAndTombstones(t *testing.T) {
 		p,
 		table.Name,
 		"k",
-		"application/json",
+		ValueTypeString,
 		strings.NewReader(`{"v":2}`),
 		t2,
 		WriteCondition{All: []Condition{
 			{Field: "updatedAt", Op: "lt", Value: t2},
-			{Field: "contentType", Op: "eq", Value: "application/json"},
+			{Field: "contentType", Op: "eq", Value: ValueTypeString},
 			{Field: "value", Op: "startswith", Value: `{"v":`},
 		}},
 	)
@@ -993,7 +993,7 @@ func TestConditionalWritesAndTombstones(t *testing.T) {
 		p,
 		table.Name,
 		"k",
-		"application/json",
+		ValueTypeString,
 		strings.NewReader(`{"v":3}`),
 		t3,
 		WriteCondition{All: []Condition{{Field: "updatedAt", Op: "lt", Value: t2}}},
@@ -1039,7 +1039,7 @@ func TestConditionalWritesAndTombstones(t *testing.T) {
 		p,
 		table.Name,
 		"k",
-		"text/plain",
+		ValueTypeString,
 		strings.NewReader("again"),
 		t5,
 		WriteCondition{All: []Condition{
@@ -1066,7 +1066,7 @@ func TestWriteConditionsOnMetadataAndExternalValue(t *testing.T) {
 		t3 = int64(1_760_000_000_103)
 	)
 	first, err := s.PutKeyConditional(
-		p, table.Name, "k", "text/plain", strings.NewReader("abcdefgh"), t1,
+		p, table.Name, "k", ValueTypeString, strings.NewReader("abcdefgh"), t1,
 		WriteCondition{All: []Condition{{Field: "updatedAt", Op: "lt", Value: t1}}},
 	)
 	if err != nil {
@@ -1077,13 +1077,12 @@ func TestWriteConditionsOnMetadataAndExternalValue(t *testing.T) {
 	}
 
 	second, err := s.PutKeyConditional(
-		p, table.Name, "k", "text/plain", strings.NewReader("zzzzzzzz"), t2,
+		p, table.Name, "k", ValueTypeString, strings.NewReader("zzzzzzzz"), t2,
 		WriteCondition{All: []Condition{
 			{Field: "exists", Op: "eq", Value: true},
 			{Field: "deleted", Op: "eq", Value: false},
 			{Field: "size", Op: "eq", Value: int64(8)},
-			{Field: "contentType", Op: "startswith", Value: "text/"},
-			{Field: "contentHash", Op: "eq", Value: first.ContentHash},
+			{Field: "contentType", Op: "eq", Value: ValueTypeString},
 			{Field: "value", Op: "startswith", Value: "abc"},
 			{Field: "value", Op: "endswith", Value: "fgh"},
 		}},
@@ -1096,7 +1095,7 @@ func TestWriteConditionsOnMetadataAndExternalValue(t *testing.T) {
 	}
 
 	_, err = s.PutKeyConditional(
-		p, table.Name, "k", "text/plain", strings.NewReader("wrong"), t3,
+		p, table.Name, "k", ValueTypeString, strings.NewReader("wrong"), t3,
 		WriteCondition{All: []Condition{{Field: "value", Op: "lt", Value: "aaaa"}}},
 	)
 	if !errors.Is(err, ErrPreconditionFailed) {
@@ -1136,7 +1135,7 @@ func TestWriteConditionIsAtomicUnderConcurrency(t *testing.T) {
 		go func(i int, value string) {
 			defer wg.Done()
 			_, err := s.PutKeyConditional(
-				p, table.Name, "k", "text/plain", strings.NewReader(value),
+				p, table.Name, "k", ValueTypeString, strings.NewReader(value),
 				int64(1_760_000_000_200+i), condition,
 			)
 			errs <- err
@@ -1166,14 +1165,14 @@ func TestQueryRecordsByPrefixGlobAndTime(t *testing.T) {
 	p, _ := mustProject(t, s, "demo")
 	table := mustTable(t, s, p, "records")
 
-	first, err := s.PutKey(p, table.Name, "watchLater/series:1", "application/json", strings.NewReader(`{"v":1}`))
+	first, err := s.PutKey(p, table.Name, "watchLater/series:1", ValueTypeString, strings.NewReader(`{"v":1}`))
 	if err != nil {
 		t.Fatalf("put first: %v", err)
 	}
-	if _, err := s.PutKey(p, table.Name, "watchLater/series:2", "application/json", strings.NewReader(`{"v":2}`)); err != nil {
+	if _, err := s.PutKey(p, table.Name, "watchLater/series:2", ValueTypeString, strings.NewReader(`{"v":2}`)); err != nil {
 		t.Fatalf("put second: %v", err)
 	}
-	if _, err := s.PutKey(p, table.Name, "progress/episode:1", "application/json", strings.NewReader(`{"p":1}`)); err != nil {
+	if _, err := s.PutKey(p, table.Name, "progress/episode:1", ValueTypeString, strings.NewReader(`{"p":1}`)); err != nil {
 		t.Fatalf("put third: %v", err)
 	}
 
@@ -1234,10 +1233,10 @@ func TestQueryRecordsValueBudget(t *testing.T) {
 	p, _ := mustProject(t, s, "demo")
 	table := mustTable(t, s, p, "large")
 	value := strings.Repeat("x", 17<<20)
-	if _, err := s.PutKey(p, table.Name, "a", "text/plain", strings.NewReader(value)); err != nil {
+	if _, err := s.PutKey(p, table.Name, "a", ValueTypeString, strings.NewReader(value)); err != nil {
 		t.Fatalf("put a: %v", err)
 	}
-	if _, err := s.PutKey(p, table.Name, "b", "text/plain", strings.NewReader(value)); err != nil {
+	if _, err := s.PutKey(p, table.Name, "b", ValueTypeString, strings.NewReader(value)); err != nil {
 		t.Fatalf("put b: %v", err)
 	}
 	if _, err := s.QueryRecords(p, table.Name, RecordQuery{IncludeValues: true}); !errors.Is(err, ErrQueryValueLimit) {
@@ -1256,13 +1255,13 @@ func TestTableKeyCountTracksLiveRecords(t *testing.T) {
 	s, _ := openTestStore(t, 1<<20, 16)
 	p, _ := mustProject(t, s, "demo")
 	table := mustTable(t, s, p, "state")
-	if _, err := s.PutKey(p, table.Name, "a", "text/plain", strings.NewReader("one")); err != nil {
+	if _, err := s.PutKey(p, table.Name, "a", ValueTypeString, strings.NewReader("one")); err != nil {
 		t.Fatalf("put a: %v", err)
 	}
-	if _, err := s.PutKey(p, table.Name, "b", "text/plain", strings.NewReader("two")); err != nil {
+	if _, err := s.PutKey(p, table.Name, "b", ValueTypeString, strings.NewReader("two")); err != nil {
 		t.Fatalf("put b: %v", err)
 	}
-	if _, err := s.PutKey(p, table.Name, "a", "text/plain", strings.NewReader("updated")); err != nil {
+	if _, err := s.PutKey(p, table.Name, "a", ValueTypeString, strings.NewReader("updated")); err != nil {
 		t.Fatalf("overwrite a: %v", err)
 	}
 	summary, err := s.GetTableSummary(p, table.Name)
@@ -1282,7 +1281,7 @@ func TestTableKeyCountTracksLiveRecords(t *testing.T) {
 	if summary.KeyCount != 1 {
 		t.Fatalf("key count after delete = %d, want 1", summary.KeyCount)
 	}
-	if _, err := s.PutKey(p, table.Name, "a", "text/plain", strings.NewReader("again")); err != nil {
+	if _, err := s.PutKey(p, table.Name, "a", ValueTypeString, strings.NewReader("again")); err != nil {
 		t.Fatalf("recreate a: %v", err)
 	}
 	summary, err = s.GetTableSummary(p, table.Name)
@@ -1309,7 +1308,7 @@ func TestStartupRejectsMissingPhysicalTable(t *testing.T) {
 	}
 	p, _ := mustProject(t, s, "demo")
 	table := mustTable(t, s, p, "files")
-	meta, err := s.PutKey(p, table.Name, "k", "text/plain", strings.NewReader(strings.Repeat("x", 100)))
+	meta, err := s.PutKey(p, table.Name, "k", ValueTypeString, strings.NewReader(strings.Repeat("x", 100)))
 	if err != nil {
 		t.Fatalf("PutKey: %v", err)
 	}
@@ -1587,7 +1586,7 @@ func TestProjectSchemaMigratesV1ToV2(t *testing.T) {
 	}
 	p, _ := mustProject(t, s, "demo")
 	table := mustTable(t, s, p, "main")
-	if _, err := s.PutKey(p, table.Name, "keep", "text/plain", strings.NewReader("migrated value")); err != nil {
+	if _, err := s.PutKey(p, table.Name, "keep", ValueTypeString, strings.NewReader("migrated value")); err != nil {
 		t.Fatalf("PutKey: %v", err)
 	}
 	if err := s.Close(); err != nil {

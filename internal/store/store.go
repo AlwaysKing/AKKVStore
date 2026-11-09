@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -122,10 +121,20 @@ type TableSummary struct {
 	Table
 }
 
+// ValueType 是 value 的业务类型。
+type ValueType int
+
+const (
+	// ValueTypeString 表示 value 是 UTF-8 字符串。
+	ValueTypeString ValueType = 0
+	// ValueTypeFile 表示 value 是原始文件内容。
+	ValueTypeFile ValueType = 1
+)
+
 // KeyMeta 是一个 key 的元数据。
 type KeyMeta struct {
 	Key         string
-	ContentType string
+	ContentType ValueType
 	Size        int64
 	CreatedAt   int64
 	UpdatedAt   int64
@@ -142,14 +151,14 @@ type WriteCondition struct {
 
 // PreconditionFailed 携带条件不成立时的当前记录状态。
 type PreconditionFailed struct {
-	Key           string `json:"key"`
-	Exists        bool   `json:"exists"`
-	Deleted       bool   `json:"deleted"`
-	UpdatedAt     int64  `json:"updatedAt"`
-	CreatedAt     int64  `json:"createdAt"`
-	ContentType   string `json:"contentType,omitempty"`
-	ContentHash   string `json:"contentHash,omitempty"`
-	ContentLength int64  `json:"contentLength"`
+	Key         string    `json:"key"`
+	Exists      bool      `json:"exists"`
+	Deleted     bool      `json:"deleted"`
+	UpdatedAt   int64     `json:"updatedAt"`
+	CreatedAt   int64     `json:"-"`
+	ContentType ValueType `json:"contentType"`
+	ContentHash string    `json:"-"`
+	Size        int64     `json:"size"`
 }
 
 func (e *PreconditionFailed) Error() string {
@@ -711,7 +720,7 @@ func dataTableSQL(table string) string {
 		value BLOB,
 		blob_hash TEXT,
 		content_hash TEXT NOT NULL,
-		content_type TEXT NOT NULL,
+		content_type INTEGER NOT NULL DEFAULT 0 CHECK(content_type IN (0, 1)),
 		size INTEGER NOT NULL,
 		created_at INTEGER NOT NULL DEFAULT 0,
 		updated_at INTEGER NOT NULL,
@@ -905,19 +914,12 @@ func ValidateKey(key string) error {
 	return nil
 }
 
-// NormalizeContentType 校验并返回可存储的 Content-Type。
-func NormalizeContentType(v string) (string, error) {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return "application/octet-stream", nil
+// ValidateValueType 检查 value 类型是否受支持。
+func ValidateValueType(v ValueType) error {
+	if v != ValueTypeString && v != ValueTypeFile {
+		return fmt.Errorf("%w: contentType 只支持 0 (string) 或 1 (file)", ErrInvalid)
 	}
-	if len(v) > 255 {
-		return "", fmt.Errorf("%w: Content-Type 过长", ErrInvalid)
-	}
-	if _, _, err := mime.ParseMediaType(v); err != nil {
-		return "", fmt.Errorf("%w: Content-Type 不合法", ErrInvalid)
-	}
-	return v, nil
+	return nil
 }
 
 // CreateProject 创建 system.db 记录和独立 project.db，不创建任何 table。

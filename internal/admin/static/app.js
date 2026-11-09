@@ -141,30 +141,6 @@
     }, 0);
   }
 
-  function beginContentTypeEdit(cell) {
-    cancelCellEdit();
-    closeNewKeyEditor();
-    editingCell = cell;
-    editingType = "content-type";
-    cell._originalHTML = cell.innerHTML;
-    cell.classList.add("editing");
-
-    var form = document.getElementById("inline-content-type-edit-form");
-    form.querySelector("[data-inline-content-type-key]").value = cell.getAttribute("data-key");
-
-    var input = document.createElement("input");
-    input.className = "inline-cell-editor";
-    input.name = "content_type";
-    input.value = cell.getAttribute("data-content-type") || "";
-    input.setAttribute("form", "inline-content-type-edit-form");
-    input.title = "Enter 保存，Esc 取消";
-    cell.replaceChildren(input);
-    window.setTimeout(function () {
-      input.focus();
-      input.select();
-    }, 0);
-  }
-
   function createInlineFileUpload(formID) {
     var label = document.createElement("label");
     label.className = "inline-file-button";
@@ -243,11 +219,6 @@
       var requireFile = form ? form.querySelector("[data-inline-require-file]") : null;
       if (requireFile) {
         requireFile.value = "";
-        var contentType = form.querySelector("[data-inline-content-type]");
-        var textContentType = editor.getAttribute("data-text-content-type");
-        if (contentType && textContentType) {
-          contentType.value = textContentType;
-        }
       }
     }
     setInlineTextMode(editor, true);
@@ -262,7 +233,6 @@
 
     var form = document.getElementById("inline-value-edit-form");
     form.setAttribute("action", cell.getAttribute("data-edit-url"));
-    form.querySelector("[data-inline-content-type]").value = data.contentType || "application/octet-stream";
     var originalIsFile = Boolean(data.external || !data.editable);
     form.querySelector("[data-inline-require-file]").value = originalIsFile ? "1" : "";
 
@@ -276,8 +246,6 @@
 
     var editor = document.createElement("div");
     editor.className = "inline-value-editor";
-    editor.setAttribute("data-text-content-type",
-      data.editable ? (data.contentType || "text/plain; charset=utf-8") : "text/plain; charset=utf-8");
     editor.appendChild(textarea);
     editor.appendChild(createInlineFileBadge());
     var upload = createInlineFileUpload("inline-value-edit-form");
@@ -322,10 +290,6 @@
     }
     if (cell.getAttribute("data-cell") === "key") {
       beginKeyEdit(cell);
-      return;
-    }
-    if (cell.getAttribute("data-cell") === "content-type") {
-      beginContentTypeEdit(cell);
       return;
     }
     if (cell.getAttribute("data-cell") === "value") {
@@ -713,8 +677,6 @@
       event.preventDefault();
       if (editingType === "key") {
         submitForm(document.getElementById("inline-key-rename-form"));
-      } else if (editingType === "content-type") {
-        submitForm(document.getElementById("inline-content-type-edit-form"));
       } else if (editingType === "value") {
         submitForm(document.getElementById("inline-value-edit-form"));
       }

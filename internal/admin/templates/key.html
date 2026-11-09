@@ -13,7 +13,7 @@
         <h2>{{if .Exists}}{{.Key}}{{else}}新建 Key{{end}}</h2>
         {{if .Exists}}
         <p>
-          {{.ContentType}} · {{humanSize .Size}} · 更新于 {{formatTime .UpdatedAt}} ·
+          {{valueTypeLabel .ContentType}} · {{humanSize .Size}} · 更新于 {{formatTime .UpdatedAt}} ·
           <a href="/admin/projects/{{path .Project.Name}}/tables/{{path .Table.Name}}/download?key={{urlquery .Key}}">下载原始内容</a>
         </p>
         {{else}}
@@ -39,9 +39,7 @@
           </label>
           {{end}}
 
-          <label>Content-Type
-            <input name="content_type" value="{{.ContentType}}" placeholder="application/json">
-          </label>
+          <span class="muted">类型：{{valueTypeLabel .ContentType}}</span>
         </div>
 
         {{if or (not .Exists) .Previewable}}
@@ -56,7 +54,7 @@
           <label>上传文件{{if and .Exists (not .Previewable)}}（必选）{{end}}
             <input type="file" name="file">
           </label>
-          <p class="hint">上传文件时优先使用文件自身的 Content-Type；大文件会流式写入磁盘，不占用同等内存。</p>
+          <p class="hint">上传文件时类型固定为 file；大文件会流式写入磁盘，不占用同等内存。</p>
         </div>
 
         <div class="form-actions">
